@@ -20,6 +20,7 @@ struct ClipItem: Identifiable, Equatable {
     let copiedAt: Date
     let sourceBundleID: String?
     let sourceAppName: String?
+    let customTitle: String?
     let contentType: ClipContentType
     let linkURL: URL?
     let linkDisplayText: String?
@@ -27,12 +28,20 @@ struct ClipItem: Identifiable, Equatable {
     let characterCount: Int
     let previewText: String
 
-    init(id: Int64, content: String, copiedAt: Date, sourceBundleID: String?, sourceAppName: String?) {
+    init(
+        id: Int64,
+        content: String,
+        copiedAt: Date,
+        sourceBundleID: String?,
+        sourceAppName: String?,
+        customTitle: String? = nil
+    ) {
         self.id = id
         self.content = content
         self.copiedAt = copiedAt
         self.sourceBundleID = sourceBundleID
         self.sourceAppName = sourceAppName
+        self.customTitle = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         let detectedLink = Self.detectLinkURL(from: trimmed)
@@ -40,7 +49,8 @@ struct ClipItem: Identifiable, Equatable {
         self.linkURL = detectedLink
         self.linkDisplayText = detectedLink.map(Self.linkDisplayText(for:))
 
-        self.searchableContent = content
+        self.searchableContent = ([content, self.customTitle].compactMap { $0 })
+            .joined(separator: " ")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
         self.characterCount = content.count
@@ -52,6 +62,13 @@ struct ClipItem: Identifiable, Equatable {
 
     var typeLabel: String {
         contentType.label
+    }
+
+    var displayTitle: String {
+        if let customTitle, !customTitle.isEmpty {
+            return customTitle
+        }
+        return typeLabel
     }
 
     private static let surroundingPunctuation = CharacterSet(charactersIn: "<>[](){}\"'`.,;:!?")

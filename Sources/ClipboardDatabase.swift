@@ -30,6 +30,8 @@ final class ClipboardDatabase {
 
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+    private static let latestUserVersion: Int32 = 2
+
     init(url: URL) throws {
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
@@ -47,6 +49,8 @@ final class ClipboardDatabase {
         do {
             try execute("PRAGMA journal_mode = WAL;")
             try execute("PRAGMA synchronous = NORMAL;")
+            try execute("PRAGMA foreign_keys = ON;")
+
             try execute("""
             CREATE TABLE IF NOT EXISTS clip_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +62,8 @@ final class ClipboardDatabase {
             """)
             try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_copied_at ON clip_items(copied_at DESC);")
             try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_content ON clip_items(content);")
-            try runDedupMigrationOnce()
+
+            try runMigrationsIfNeeded()
         } catch {
             sqlite3_close(handle)
             db = nil
@@ -80,24 +85,52 @@ final class ClipboardDatabase {
 
             let now = Date()
 
-            // Delete + insert in one transaction for dedup
-            try executeInner("DELETE FROM clip_items WHERE content = ?;", bindings: [(content, 1)])
+            if let existingID = try existingClipID(forContent: content, db: db) {
+                let updateSQL = """
+                UPDATE clip_items
+                SET copied_at = ?, source_bundle_id = ?, source_app_name = ?
+                WHERE id = ?;
+                """
 
-            let sql = "INSERT INTO clip_items(content, copied_at, source_bundle_id, source_app_name) VALUES (?, ?, ?, ?);"
-            var statement: OpaquePointer?
+                var updateStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(db, updateSQL, -1, &updateStatement, nil) == SQLITE_OK else {
+                    throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(updateStatement) }
 
-            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                sqlite3_bind_double(updateStatement, 1, now.timeIntervalSince1970)
+                bind(sourceBundleID, at: 2, to: updateStatement)
+                bind(sourceAppName, at: 3, to: updateStatement)
+                sqlite3_bind_int64(updateStatement, 4, existingID)
+
+                guard sqlite3_step(updateStatement) == SQLITE_DONE else {
+                    throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+                }
+
+                return ClipItem(
+                    id: existingID,
+                    content: content,
+                    copiedAt: now,
+                    sourceBundleID: sourceBundleID,
+                    sourceAppName: sourceAppName
+                )
+            }
+
+            let insertSQL = "INSERT INTO clip_items(content, copied_at, source_bundle_id, source_app_name) VALUES (?, ?, ?, ?);"
+            var insertStatement: OpaquePointer?
+
+            guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
                 throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
             }
 
-            defer { sqlite3_finalize(statement) }
+            defer { sqlite3_finalize(insertStatement) }
 
-            bind(content, at: 1, to: statement)
-            sqlite3_bind_double(statement, 2, now.timeIntervalSince1970)
-            bind(sourceBundleID, at: 3, to: statement)
-            bind(sourceAppName, at: 4, to: statement)
+            bind(content, at: 1, to: insertStatement)
+            sqlite3_bind_double(insertStatement, 2, now.timeIntervalSince1970)
+            bind(sourceBundleID, at: 3, to: insertStatement)
+            bind(sourceAppName, at: 4, to: insertStatement)
 
-            guard sqlite3_step(statement) == SQLITE_DONE else {
+            guard sqlite3_step(insertStatement) == SQLITE_DONE else {
                 throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
             }
 
@@ -136,6 +169,7 @@ final class ClipboardDatabase {
 
             var items: [ClipItem] = []
             items.reserveCapacity(limit)
+
             while sqlite3_step(statement) == SQLITE_ROW {
                 let id = sqlite3_column_int64(statement, 0)
                 let content = columnText(statement, index: 1) ?? ""
@@ -158,6 +192,237 @@ final class ClipboardDatabase {
         }
     }
 
+    func fetchBuckets() throws -> [Bucket] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            SELECT id, name, color_hex
+            FROM buckets
+            ORDER BY created_at ASC, id ASC;
+            """
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var buckets: [Bucket] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                buckets.append(
+                    Bucket(
+                        id: sqlite3_column_int64(statement, 0),
+                        name: columnText(statement, index: 1) ?? BucketDefaults.defaultName,
+                        colorHex: columnText(statement, index: 2) ?? BucketDefaults.defaultColorHex
+                    )
+                )
+            }
+            return buckets
+        }
+    }
+
+    func createBucket(name: String, colorHex: String) throws -> Bucket {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let now = Date().timeIntervalSince1970
+            let sql = "INSERT INTO buckets(name, color_hex, created_at) VALUES (?, ?, ?);"
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(name, at: 1, to: statement)
+            bind(colorHex, at: 2, to: statement)
+            sqlite3_bind_double(statement, 3, now)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+
+            let bucketID = sqlite3_last_insert_rowid(db)
+            return Bucket(id: bucketID, name: name, colorHex: colorHex)
+        }
+    }
+
+    func renameBucket(id: Int64, name: String) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE buckets SET name = ? WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(name, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func updateBucketColor(id: Int64, colorHex: String) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE buckets SET color_hex = ? WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(colorHex, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func deleteBucket(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "DELETE FROM buckets WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func addClipToBucket(clipItemID: Int64, bucketID: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let now = Date().timeIntervalSince1970
+            let sql = """
+            INSERT INTO bucket_items(bucket_id, clip_item_id, added_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(bucket_id, clip_item_id)
+            DO UPDATE SET added_at = excluded.added_at;
+            """
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, bucketID)
+            sqlite3_bind_int64(statement, 2, clipItemID)
+            sqlite3_bind_double(statement, 3, now)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func fetchItems(inBucket bucketID: Int64, limit: Int = 1200) throws -> [ClipItem] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
+            FROM bucket_items bi
+            INNER JOIN clip_items c ON c.id = bi.clip_item_id
+            WHERE bi.bucket_id = ?
+            ORDER BY bi.added_at DESC
+            LIMIT ?;
+            """
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, bucketID)
+            sqlite3_bind_int(statement, 2, Int32(limit))
+
+            var items: [ClipItem] = []
+            items.reserveCapacity(limit)
+
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let id = sqlite3_column_int64(statement, 0)
+                let content = columnText(statement, index: 1) ?? ""
+                let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+                let bundleID = columnText(statement, index: 3)
+                let appName = columnText(statement, index: 4)
+                let customTitle = columnText(statement, index: 5)
+
+                items.append(
+                    ClipItem(
+                        id: id,
+                        content: content,
+                        copiedAt: copiedAt,
+                        sourceBundleID: bundleID,
+                        sourceAppName: appName,
+                        customTitle: customTitle
+                    )
+                )
+            }
+
+            return items
+        }
+    }
+
+    func updateBucketItemTitle(bucketID: Int64, clipItemID: Int64, customTitle: String?) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let normalized = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sql = "UPDATE bucket_items SET custom_title = ? WHERE bucket_id = ? AND clip_item_id = ?;"
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind((normalized?.isEmpty ?? true) ? nil : normalized, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, bucketID)
+            sqlite3_bind_int64(statement, 3, clipItemID)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
     private func execute(_ sql: String) throws {
         guard let db else {
             throw DatabaseError.openFailed("SQLite handle is not available")
@@ -173,11 +438,13 @@ final class ClipboardDatabase {
         }
     }
 
-    private func runDedupMigrationOnce() throws {
+    private func runMigrationsIfNeeded() throws {
         guard let db else { return }
 
         var pragmaStmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &pragmaStmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &pragmaStmt, nil) == SQLITE_OK else {
+            throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+        }
         defer { sqlite3_finalize(pragmaStmt) }
 
         var version: Int32 = 0
@@ -185,37 +452,65 @@ final class ClipboardDatabase {
             version = sqlite3_column_int(pragmaStmt, 0)
         }
 
-        guard version < 1 else { return }
-
-        try execute("""
-        DELETE FROM clip_items
-        WHERE id NOT IN (
-            SELECT MAX(id)
-            FROM clip_items
-            GROUP BY content
-        );
-        """)
-        try execute("PRAGMA user_version = 1;")
-    }
-
-    private func executeInner(_ sql: String, bindings: [(String, Int32)]) throws {
-        guard let db else {
-            throw DatabaseError.openFailed("SQLite handle is not available")
+        if version < 1 {
+            try execute("""
+            DELETE FROM clip_items
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM clip_items
+                GROUP BY content
+            );
+            """)
+            version = 1
+            try execute("PRAGMA user_version = 1;")
         }
 
+        if version < 2 {
+            try execute("""
+            CREATE TABLE IF NOT EXISTS buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                color_hex TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            """)
+            try execute("""
+            CREATE TABLE IF NOT EXISTS bucket_items (
+                bucket_id INTEGER NOT NULL,
+                clip_item_id INTEGER NOT NULL,
+                custom_title TEXT,
+                added_at REAL NOT NULL,
+                PRIMARY KEY(bucket_id, clip_item_id),
+                FOREIGN KEY(bucket_id) REFERENCES buckets(id) ON DELETE CASCADE,
+                FOREIGN KEY(clip_item_id) REFERENCES clip_items(id) ON DELETE CASCADE
+            );
+            """)
+            try execute("CREATE INDEX IF NOT EXISTS idx_bucket_items_bucket_added_at ON bucket_items(bucket_id, added_at DESC);")
+            version = 2
+            try execute("PRAGMA user_version = 2;")
+        }
+
+        if version < Self.latestUserVersion {
+            try execute("PRAGMA user_version = \(Self.latestUserVersion);")
+        }
+    }
+
+    private func existingClipID(forContent content: String, db: OpaquePointer) throws -> Int64? {
+        let sql = "SELECT id FROM clip_items WHERE content = ? LIMIT 1;"
         var statement: OpaquePointer?
+
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(statement) }
 
-        for (text, index) in bindings {
-            bind(text, at: index, to: statement)
+        bind(content, at: 1, to: statement)
+
+        if sqlite3_step(statement) == SQLITE_ROW {
+            return sqlite3_column_int64(statement, 0)
         }
 
-        guard sqlite3_step(statement) == SQLITE_DONE else {
-            throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
-        }
+        return nil
     }
 
     private func bind(_ text: String?, at index: Int32, to statement: OpaquePointer?) {

@@ -181,6 +181,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             return true
         }
 
+        // Typeahead when the search field is collapsed.
+        if !store.isSearchExpanded, let typed = typeaheadCharacters(from: event) {
+            store.beginSearch(with: typed)
+            return true
+        }
+
         switch event.keyCode {
         case 123: // Left arrow
             store.moveSelection(delta: -1)
@@ -193,9 +199,15 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             return true
         case 53: // Escape
             if store.query.isEmpty {
-                close()
+                store.collapseSearchIfPossible()
+                if store.isShowingClipboard {
+                    close()
+                } else {
+                    store.showClipboardScope()
+                }
             } else {
                 store.query = ""
+                store.collapseSearchIfPossible()
             }
             return true
         default:
@@ -237,6 +249,30 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         case 25: return 8 // 9
         default: return nil
         }
+    }
+
+    private func typeaheadCharacters(from event: NSEvent) -> String? {
+        let disallowedModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .function]
+        guard event.modifierFlags.intersection(disallowedModifiers).isEmpty else {
+            return nil
+        }
+
+        switch event.keyCode {
+        case 36, 76, 48, 51, 53, 123, 124, 125, 126:
+            return nil
+        default:
+            break
+        }
+
+        guard let characters = event.charactersIgnoringModifiers, !characters.isEmpty else {
+            return nil
+        }
+
+        guard characters.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
+
+        return characters
     }
 }
 

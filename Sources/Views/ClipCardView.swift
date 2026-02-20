@@ -7,7 +7,14 @@ struct ClipCardView: View {
     let isSelected: Bool
     let commandNumber: Int?
     let icon: NSImage?
+    let accentColorOverride: Color?
+    let isTitleEditable: Bool
+    let onTitleChange: ((String?) -> Void)?
     @ObservedObject var linkPreviewStore: LinkPreviewStore
+
+    @State private var isEditingTitle = false
+    @State private var titleDraft = ""
+    @FocusState private var isTitleFocused: Bool
 
     private let cardBase = Color(white: 0.11)
     private let selectionColor = Color(red: 0.35, green: 0.55, blue: 1.0)
@@ -86,14 +93,17 @@ struct ClipCardView: View {
             guard let linkURL = item.linkURL else { return }
             linkPreviewStore.loadPreview(for: linkURL)
         }
+        .onChange(of: item.customTitle) { _, _ in
+            guard !isEditingTitle else { return }
+            titleDraft = item.customTitle ?? ""
+        }
     }
 
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.typeLabel)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.88))
+                titleView
+                    .padding(.top, 1)
 
                 Text(relativeCopiedTime)
                     .font(.system(size: 9, weight: .regular, design: .rounded))
@@ -110,7 +120,41 @@ struct ClipCardView: View {
         .padding(.trailing, 8)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(accentColor)
+        .background(effectiveAccentColor)
+    }
+
+    @ViewBuilder
+    private var titleView: some View {
+        if isEditingTitle {
+            TextField("", text: $titleDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.88))
+                .focused($isTitleFocused)
+                .onSubmit {
+                    commitTitleEdit()
+                }
+                .onAppear {
+                    DispatchQueue.main.async {
+                        isTitleFocused = true
+                    }
+                }
+                .onChange(of: isTitleFocused) { _, focused in
+                    if !focused {
+                        commitTitleEdit()
+                    }
+                }
+        } else {
+            Text(item.displayTitle)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.88))
+                .lineLimit(1)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard isTitleEditable else { return }
+                    beginTitleEdit()
+                }
+        }
     }
 
     private var textContent: some View {
@@ -228,6 +272,13 @@ struct ClipCardView: View {
         item.linkDisplayText ?? item.previewText
     }
 
+    private var effectiveAccentColor: Color {
+        if let accentColorOverride {
+            return accentColorOverride
+        }
+        return accentColor
+    }
+
     // MARK: - Accent color
 
     private var accentColor: Color {
@@ -294,5 +345,21 @@ struct ClipCardView: View {
 
         let years = elapsed / 31_536_000
         return "\(years) \(years == 1 ? "year" : "years") ago"
+    }
+
+    private func beginTitleEdit() {
+        titleDraft = item.customTitle ?? item.typeLabel
+        isEditingTitle = true
+    }
+
+    private func commitTitleEdit() {
+        guard isEditingTitle else { return }
+
+        let trimmed = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.isEmpty || trimmed == item.typeLabel ? nil : trimmed
+
+        isEditingTitle = false
+        isTitleFocused = false
+        onTitleChange?(normalized)
     }
 }
