@@ -169,6 +169,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        // When search is collapsed and an inline text field (card/bucket rename) is active,
+        // let the field own all keyboard input.
+        if isCollapsedSearchInlineEditorActive() {
+            return false
+        }
+
         // Cmd+C: copy selected and close
         if event.modifierFlags.contains(.command), event.keyCode == 8 {
             copySelectedItem()
@@ -273,6 +279,14 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         }
 
         return characters
+    }
+
+    private func isCollapsedSearchInlineEditorActive() -> Bool {
+        guard !store.isSearchExpanded else { return false }
+        guard let panel else { return false }
+        guard let firstResponder = panel.firstResponder else { return false }
+
+        return firstResponder is NSTextView || firstResponder is NSTextField
     }
 }
 
