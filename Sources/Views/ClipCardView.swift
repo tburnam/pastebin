@@ -66,10 +66,11 @@ struct ClipCardView: View {
                         .foregroundStyle(.white.opacity(0.88))
 
                     Text(relativeCopiedTime)
-                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .font(.system(size: 9, weight: .regular, design: .rounded))
                         .foregroundStyle(.white.opacity(0.46))
                         .lineLimit(1)
                 }
+                .padding(.top, 4)
 
                 Spacer(minLength: 0)
 
@@ -80,15 +81,16 @@ struct ClipCardView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(accentColor)
 
             // Content area
             VStack(alignment: .leading, spacing: 0) {
                 Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
-                    .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                    .font(.system(size: 13.5, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.74))
                     .lineLimit(5)
                     .multilineTextAlignment(.leading)
@@ -130,7 +132,7 @@ struct ClipCardView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
                     isSelected ? selectionColor.opacity(0.80) : .white.opacity(0.06),
-                    lineWidth: isSelected ? 1.6 : 0.5
+                    lineWidth: isSelected ? 2.5 : 0.5
                 )
         }
         .shadow(color: .black.opacity(isSelected ? 0.32 : 0.20), radius: isSelected ? 10 : 6, y: 2)

@@ -13,8 +13,9 @@ struct ClipboardPanelView: View {
     var body: some View {
         let filtered = store.filteredItems
 
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             topBar
+                .padding(.top, 4)
 
             if filtered.isEmpty {
                 emptyState
@@ -40,11 +41,26 @@ struct ClipboardPanelView: View {
             Spacer(minLength: 0)
         }
         .overlay(alignment: .topTrailing) {
-            Text("\u{2190} \u{2192} navigate   \u{21a9} copy   \u{21e7}\u{21a9} paste   \u{2318}1-9 jump")
-                .font(.system(size: 10, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.44))
-                .offset(y: -6)
+            HStack(spacing: 14) {
+                hintLabel("\u{2190} \u{2192}", "navigate")
+                hintLabel("\u{21a9}", "copy")
+                hintLabel("\u{21e7}\u{21a9}", "paste")
+                hintLabel("\u{2318}1-9", "jump")
+            }
+            .offset(y: -2)
+            .padding(.trailing, 4)
         }
+    }
+
+    private func hintLabel(_ symbol: String, _ label: String) -> some View {
+        HStack(alignment: .center, spacing: 3) {
+            Text(symbol)
+                .font(.system(size: 9, weight: .medium))
+                .baselineOffset(-1)
+            Text(label)
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+        }
+        .foregroundStyle(.white.opacity(0.44))
     }
 
     private var searchPill: some View {
