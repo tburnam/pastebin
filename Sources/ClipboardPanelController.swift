@@ -20,6 +20,18 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         removeEventMonitors()
     }
 
+    var isVisible: Bool {
+        panel?.isVisible == true
+    }
+
+    func toggle() {
+        if isVisible {
+            close()
+        } else {
+            open()
+        }
+    }
+
     func open() {
         let panel = ensurePanel()
         let targetFrame = frameForPanel(on: panel)
@@ -130,15 +142,22 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
-        // Cmd+Enter: activate
-        if event.modifierFlags.contains(.command), (event.keyCode == 36 || event.keyCode == 76) {
-            activateSelectedItem()
+        // Cmd+C: copy selected and close
+        if event.modifierFlags.contains(.command), event.keyCode == 8 {
+            copySelectedItem()
             return true
         }
 
-        // Cmd+1-9: jump to item
+        // Cmd+1-9: jump to item, copy, and close
         if event.modifierFlags.contains(.command), let index = commandIndex(for: event.keyCode) {
             activateItem(at: index)
+            return true
+        }
+
+        // Shift+Enter: copy, close, and paste into previous app
+        if event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.command),
+           (event.keyCode == 36 || event.keyCode == 76) {
+            copySelectedItemAndPaste()
             return true
         }
 
@@ -149,8 +168,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         case 124: // Right arrow
             store.moveSelection(delta: 1)
             return true
-        case 36, 76: // Enter (without Cmd)
-            activateSelectedItem()
+        case 36, 76: // Enter: copy and close
+            copySelectedItem()
             return true
         case 53: // Escape
             if store.query.isEmpty {
@@ -164,7 +183,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         }
     }
 
-    private func activateSelectedItem() {
+    private func copySelectedItem() {
         guard let item = store.selectedItem() else {
             NSSound.beep()
             return
@@ -172,6 +191,29 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         onSelect(item)
         close()
+    }
+
+    private func copySelectedItemAndPaste() {
+        guard let item = store.selectedItem() else {
+            NSSound.beep()
+            return
+        }
+
+        onSelect(item)
+        close()
+
+        // After the panel closes and the previous app regains focus, simulate Cmd+V.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            let source = CGEventSource(stateID: .combinedSessionState)
+
+            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
+            keyDown?.flags = .maskCommand
+            keyDown?.post(tap: .cghidEventTap)
+
+            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
+            keyUp?.flags = .maskCommand
+            keyUp?.post(tap: .cghidEventTap)
+        }
     }
 
     private func activateItem(at index: Int) {

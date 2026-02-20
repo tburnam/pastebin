@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: PasteboardMonitor?
     private var panelController: ClipboardPanelController?
     private var statusItem: NSStatusItem?
+    private var settingsPanelController: HotKeySettingsPanelController?
     private let hotKeyManager = HotKeyManager.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -27,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.store = store
             self.panelController = panelController
             self.monitor = monitor
+
+            settingsPanelController = HotKeySettingsPanelController(hotKeyManager: hotKeyManager)
 
             setupStatusItem()
 
@@ -50,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openClipboardPanel(_ sender: Any?) {
-        panelController?.open()
+        panelController?.toggle()
     }
 
     @objc private func quit(_ sender: Any?) {
@@ -58,8 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSettings(_ sender: Any?) {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: sender)
+        settingsPanelController?.open()
     }
 
     private func copyToPasteboard(_ item: ClipItem) {

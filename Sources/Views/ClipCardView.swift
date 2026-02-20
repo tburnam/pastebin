@@ -76,7 +76,7 @@ struct ClipCardView: View {
                 if let icon {
                     Image(nsImage: icon)
                         .resizable()
-                        .frame(width: 46, height: 46)
+                        .frame(width: 54, height: 54)
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
             }

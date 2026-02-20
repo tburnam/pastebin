@@ -40,7 +40,7 @@ struct ClipboardPanelView: View {
             Spacer(minLength: 0)
         }
         .overlay(alignment: .topTrailing) {
-            Text("\u{2190} \u{2192} navigate   \u{2318}\u{21a9} paste   \u{2318}1-9 jump")
+            Text("\u{2190} \u{2192} navigate   \u{21a9} copy   \u{21e7}\u{21a9} paste   \u{2318}1-9 jump")
                 .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.44))
                 .offset(y: -6)
