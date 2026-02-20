@@ -1,11 +1,13 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 struct ClipCardView: View {
     let item: ClipItem
     let isSelected: Bool
     let commandNumber: Int?
     let icon: NSImage?
+    @ObservedObject var linkPreviewStore: LinkPreviewStore
 
     private let cardBase = Color(white: 0.11)
     private let selectionColor = Color(red: 0.35, green: 0.55, blue: 1.0)
@@ -58,66 +60,15 @@ struct ClipCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header bar
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Text")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.88))
+            header
 
-                    Text(relativeCopiedTime)
-                        .font(.system(size: 9, weight: .regular, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.46))
-                        .lineLimit(1)
-                }
-                .padding(.top, 4)
-
-                Spacer(minLength: 0)
-
-                appIcon
+            if item.linkURL == nil {
+                textContent
+            } else {
+                linkContent
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 8)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(accentColor)
-
-            // Content area
-            VStack(alignment: .leading, spacing: 0) {
-                Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
-                    .font(.system(size: 13.5, weight: .regular, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.74))
-                    .lineLimit(5)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 12)
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 6) {
-                    Text("\(item.characterCount) characters")
-                        .font(.system(size: 9.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.36))
-
-                    Spacer(minLength: 0)
-
-                    if let commandNumber {
-                        Text("⌘\(commandNumber)")
-                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.50))
-                            .padding(.vertical, 2)
-                            .padding(.horizontal, 6)
-                            .background(
-                                Capsule()
-                                    .fill(.white.opacity(0.06))
-                            )
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 12)
         }
-        .frame(width: 232, height: 240)
+        .frame(width: 244, height: 252)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(cardBase)
@@ -131,6 +82,150 @@ struct ClipCardView: View {
                 )
         }
         .shadow(color: .black.opacity(isSelected ? 0.32 : 0.20), radius: isSelected ? 10 : 6, y: 2)
+        .task(id: item.linkURL?.absoluteString) {
+            guard let linkURL = item.linkURL else { return }
+            linkPreviewStore.loadPreview(for: linkURL)
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.typeLabel)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.88))
+
+                Text(relativeCopiedTime)
+                    .font(.system(size: 9, weight: .regular, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.46))
+                    .lineLimit(1)
+            }
+            .padding(.top, 4)
+
+            Spacer(minLength: 0)
+
+            appIcon
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(accentColor)
+    }
+
+    private var textContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
+                .font(.system(size: 13.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(5)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 12)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var linkContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            linkPreviewBox
+                .padding(.top, 10)
+
+            Text(linkTitle)
+                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.82))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 8)
+
+            Text(linkSubtitle)
+                .font(.system(size: 9.8, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.46))
+                .lineLimit(1)
+                .padding(.top, 2)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: false)
+                .padding(.top, 9)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var linkPreviewBox: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(white: 0.84, opacity: 0.90))
+
+            if let previewImage = linkPreview?.image {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "link")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.black.opacity(0.34))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 108)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.black.opacity(0.12), lineWidth: 0.7)
+        }
+    }
+
+    private func footer(showCharacterCount: Bool) -> some View {
+        HStack(spacing: 6) {
+            if showCharacterCount {
+                Text("\(item.characterCount) characters")
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.36))
+            }
+
+            Spacer(minLength: 0)
+
+            if let commandNumber {
+                Text("⌘\(commandNumber)")
+                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.50))
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 6)
+                    .background(
+                        Capsule()
+                            .fill(.white.opacity(0.06))
+                    )
+            }
+        }
+    }
+
+    private var linkPreview: LinkPreviewData? {
+        guard let linkURL = item.linkURL else { return nil }
+        return linkPreviewStore.preview(for: linkURL)
+    }
+
+    private var linkTitle: String {
+        if let title = linkPreview?.title, !title.isEmpty {
+            return title
+        }
+
+        if let host = item.linkURL?.host, !host.isEmpty {
+            return host
+        }
+
+        return "Link"
+    }
+
+    private var linkSubtitle: String {
+        item.linkDisplayText ?? item.previewText
     }
 
     // MARK: - Accent color
@@ -150,21 +245,24 @@ struct ClipCardView: View {
     }
 
     private var appIcon: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(.black.opacity(0.28))
-
+        Group {
             if let icon {
                 Image(nsImage: icon)
                     .resizable()
+                    .scaledToFit()
+                    .frame(width: 46, height: 46)
             } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.44))
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(.black.opacity(0.28))
+
+                    Image(systemName: "app.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.44))
+                }
             }
         }
         .frame(width: 54, height: 54)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
     private var relativeCopiedTime: String {

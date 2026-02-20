@@ -6,6 +6,7 @@ struct ClipboardPanelView: View {
     let onActivateItem: (Int) -> Void
 
     @FocusState private var isSearchFocused: Bool
+    @StateObject private var linkPreviewStore = LinkPreviewStore()
 
     private let panelRadius: CGFloat = 22
     private let edgePadding: CGFloat = 14
@@ -95,16 +96,21 @@ struct ClipboardPanelView: View {
     }
 
     private func cardsView(filtered: [ClipItem]) -> some View {
-        ScrollViewReader { proxy in
+        let enumeratedItems = Array(filtered.enumerated())
+        let selectedItemID = store.selectedItem()?.id
+
+        return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 14) {
-                    ForEach(filtered.indices, id: \.self) { index in
-                        let item = filtered[index]
+                    ForEach(enumeratedItems, id: \.element.id) { entry in
+                        let index = entry.offset
+                        let item = entry.element
                         ClipCardView(
                             item: item,
-                            isSelected: store.selectedIndex == index,
+                            isSelected: selectedItemID == item.id,
                             commandNumber: index < 9 ? index + 1 : nil,
-                            icon: store.icon(for: item)
+                            icon: store.icon(for: item),
+                            linkPreviewStore: linkPreviewStore
                         )
                         .id(item.id)
                         .overlay {

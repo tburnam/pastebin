@@ -129,7 +129,8 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        selectedIndex = (selectedIndex + delta + count) % count
+        let nextIndex = selectedIndex + delta
+        selectedIndex = min(max(nextIndex, 0), count - 1)
     }
 
     func select(_ index: Int) {
