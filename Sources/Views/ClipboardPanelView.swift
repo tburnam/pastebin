@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ClipboardPanelView: View {
     @ObservedObject var store: ClipboardStore
@@ -8,10 +7,16 @@ struct ClipboardPanelView: View {
 
     @FocusState private var isSearchFocused: Bool
     @StateObject private var linkPreviewStore = LinkPreviewStore()
+    @State private var droppedBucketColorByClipID: [Int64: String] = [:]
+    @State private var activeCardDrag: ActiveCardDrag?
+    @State private var hoveredBucketID: Int64?
+    @State private var dropPulseBucketID: Int64?
+    @State private var bucketFrames: [Int64: CGRect] = [:]
 
     private let panelRadius: CGFloat = 22
     private let edgePadding: CGFloat = 14
-    private let topControlHeight: CGFloat = 30
+    private let topControlHeight: CGFloat = 38
+    private let dragCoordinateSpaceName = "clipboard-panel-drag-space"
 
     var body: some View {
         let filtered = store.filteredItems
@@ -31,6 +36,17 @@ struct ClipboardPanelView: View {
         .padding(edgePadding)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
         .shadow(color: .black.opacity(0.30), radius: 28, y: 4)
+        .coordinateSpace(name: dragCoordinateSpaceName)
+        .overlay(alignment: .topLeading) {
+            if let activeCardDrag {
+                dragPreview(title: activeCardDrag.title)
+                    .position(activeCardDrag.location)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onPreferenceChange(BucketChipFramePreferenceKey.self) { frames in
+            bucketFrames = frames
+        }
         .onAppear {
             isSearchFocused = store.isSearchExpanded
         }
@@ -129,11 +145,10 @@ struct ClipboardPanelView: View {
                     title: bucket.name,
                     color: Color(hex: bucket.colorHex),
                     isSelected: store.selectedBucketID == bucket.id,
+                    isDropTargeted: hoveredBucketID == bucket.id,
+                    didJustReceiveDrop: dropPulseBucketID == bucket.id,
                     onTap: {
                         store.showBucketScope(bucketID: bucket.id)
-                    },
-                    onDropIntoBucket: { providers in
-                        handleDrop(providers: providers, into: bucket.id)
                     },
                     onRename: { newName in
                         store.renameBucket(bucketID: bucket.id, newName: newName)
@@ -145,6 +160,14 @@ struct ClipboardPanelView: View {
                         store.recolorBucket(bucketID: bucket.id, colorHex: newColorHex)
                     }
                 )
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: BucketChipFramePreferenceKey.self,
+                            value: [bucket.id: proxy.frame(in: .named(dragCoordinateSpaceName))]
+                        )
+                    }
+                }
             }
         }
     }
@@ -250,7 +273,7 @@ struct ClipboardPanelView: View {
     private func cardsView(filtered: [ClipItem]) -> some View {
         let enumeratedItems = Array(filtered.enumerated())
         let selectedItemID = store.selectedItem()?.id
-        let bucketAccentColor = store.activeBucket.map { Color(hex: $0.colorHex) }
+        let activeBucketAccentColor = store.activeBucket.map { Color(hex: $0.colorHex) }
         let isBucketScope = !store.isShowingClipboard
 
         return ScrollViewReader { proxy in
@@ -259,13 +282,14 @@ struct ClipboardPanelView: View {
                     ForEach(enumeratedItems, id: \.element.id) { entry in
                         let index = entry.offset
                         let item = entry.element
+                        let clipboardScopeAccentColor = droppedBucketColorByClipID[item.id].map(Color.init(hex:))
 
                         ClipCardView(
                             item: item,
                             isSelected: selectedItemID == item.id,
                             commandNumber: index < 9 ? index + 1 : nil,
                             icon: store.icon(for: item),
-                            accentColorOverride: bucketAccentColor,
+                            accentColorOverride: isBucketScope ? activeBucketAccentColor : clipboardScopeAccentColor,
                             isTitleEditable: isBucketScope,
                             onTitleChange: { title in
                                 store.updateTitleOverrideForSelectedBucket(clipItemID: item.id, title: title)
@@ -280,9 +304,8 @@ struct ClipboardPanelView: View {
                         .onTapGesture(count: 2) {
                             onActivateItem(index)
                         }
-                        .onDrag {
-                            NSItemProvider(object: NSString(string: "\(item.id)"))
-                        }
+                        .opacity(activeCardDrag?.clipItemID == item.id ? 0.34 : 1.0)
+                        .highPriorityGesture(cardDragGesture(for: item))
                     }
                 }
                 .padding(.horizontal, 4)
@@ -352,27 +375,104 @@ struct ClipboardPanelView: View {
 
     // MARK: - Bucket interactions
 
-    private func handleDrop(providers: [NSItemProvider], into bucketID: Int64) -> Bool {
-        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
-            return false
-        }
-
-        provider.loadObject(ofClass: NSString.self) { item, _ in
-            guard let stringObject = item as? NSString else {
-                return
-            }
-
-            let string = String(stringObject)
-            guard let clipItemID = Int64(string.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                return
-            }
-
-            DispatchQueue.main.async {
-                store.addItemToBucket(clipItemID: clipItemID, bucketID: bucketID)
-            }
-        }
-
+    private func handleDrop(clipItemID: Int64, into bucketID: Int64, bucketColorHex: String) -> Bool {
+        droppedBucketColorByClipID[clipItemID] = bucketColorHex
+        store.addItemToBucket(clipItemID: clipItemID, bucketID: bucketID)
+        playBucketDropPulse(bucketID: bucketID)
         return true
+    }
+
+    private func cardDragGesture(for item: ClipItem) -> some Gesture {
+        DragGesture(minimumDistance: 2, coordinateSpace: .named(dragCoordinateSpaceName))
+            .onChanged { value in
+                updateCardDrag(for: item, location: value.location)
+            }
+            .onEnded { value in
+                finishCardDrag(for: item, location: value.location)
+            }
+    }
+
+    private func updateCardDrag(for item: ClipItem, location: CGPoint) {
+        if activeCardDrag?.clipItemID == item.id {
+            activeCardDrag?.location = location
+        } else {
+            activeCardDrag = ActiveCardDrag(
+                clipItemID: item.id,
+                title: item.displayTitle,
+                location: location
+            )
+        }
+
+        hoveredBucketID = bucketID(at: location)
+    }
+
+    private func finishCardDrag(for item: ClipItem, location: CGPoint) {
+        guard activeCardDrag?.clipItemID == item.id else {
+            activeCardDrag = nil
+            hoveredBucketID = nil
+            return
+        }
+
+        let destinationBucketID = bucketID(at: location)
+
+        activeCardDrag = nil
+        hoveredBucketID = nil
+
+        guard let destinationBucketID,
+              let bucket = store.buckets.first(where: { $0.id == destinationBucketID }) else {
+            return
+        }
+
+        _ = handleDrop(
+            clipItemID: item.id,
+            into: destinationBucketID,
+            bucketColorHex: bucket.colorHex
+        )
+    }
+
+    private func bucketID(at location: CGPoint) -> Int64? {
+        for bucket in store.buckets {
+            guard let frame = bucketFrames[bucket.id] else { continue }
+            if frame.contains(location) {
+                return bucket.id
+            }
+        }
+        return nil
+    }
+
+    private func playBucketDropPulse(bucketID: Int64) {
+        dropPulseBucketID = bucketID
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            if dropPulseBucketID == bucketID {
+                dropPulseBucketID = nil
+            }
+        }
+    }
+
+    private func dragPreview(title: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "doc.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.92))
+
+            Text(title)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(.black.opacity(0.74))
+        )
+        .overlay(
+            Capsule()
+                .stroke(.white.opacity(0.20), lineWidth: 0.8)
+        )
+        .frame(maxWidth: 140)
     }
 
     private func promptDelete(for bucket: Bucket) {
@@ -426,17 +526,18 @@ private struct BucketChip: View {
     let title: String
     let color: Color
     let isSelected: Bool
+    let isDropTargeted: Bool
+    let didJustReceiveDrop: Bool
     let onTap: () -> Void
-    let onDropIntoBucket: ([NSItemProvider]) -> Bool
     let onRename: (String) -> Void
     let onDelete: () -> Void
     let onRecolor: (String) -> Void
 
-    @State private var isDropTargeted = false
     @State private var isRenaming = false
     @State private var renameDraft = ""
     @FocusState private var isRenameFocused: Bool
-    private let chipHeight: CGFloat = 27
+    private let chipHeight: CGFloat = 29
+    private let hitTargetHeight: CGFloat = 32
 
     var body: some View {
         Group {
@@ -466,37 +567,50 @@ private struct BucketChip: View {
                         }
                 }
             } else {
-                Button(action: onTap) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(color)
-                            .frame(width: 9, height: 9)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 9, height: 9)
 
-                        Text(title)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
-                            .lineLimit(1)
-                    }
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
+                        .lineLimit(1)
                 }
-                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    onTap()
+                }
             }
         }
         .padding(.horizontal, 10)
         .frame(height: chipHeight)
         .background {
             Capsule()
-                .fill(isSelected ? .white.opacity(0.18) : .white.opacity(0.08))
+                .fill(backgroundFill)
         }
         .overlay {
             Capsule()
                 .stroke(
-                    isDropTargeted ? color.opacity(0.9) : (isSelected ? .white.opacity(0.42) : .white.opacity(0.24)),
-                    lineWidth: isDropTargeted ? 1.4 : 0.8
+                    strokeColor,
+                    lineWidth: isDropTargeted || didJustReceiveDrop ? 1.6 : 0.8
                 )
         }
-        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isDropTargeted) { providers in
-            onDropIntoBucket(providers)
+        .overlay(alignment: .topTrailing) {
+            if isDropTargeted {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(red: 0.35, green: 0.93, blue: 0.53))
+                    .offset(x: 4, y: -4)
+                    .transition(.scale.combined(with: .opacity))
+            }
         }
+        .scaleEffect(isDropTargeted ? 1.04 : (didJustReceiveDrop ? 1.07 : 1.0))
+        .shadow(color: glowColor, radius: isDropTargeted ? 12 : (didJustReceiveDrop ? 10 : 0), y: 0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.78), value: isDropTargeted)
+        .animation(.spring(response: 0.26, dampingFraction: 0.62), value: didJustReceiveDrop)
+        .frame(height: hitTargetHeight)
+        .contentShape(Rectangle())
         .onChange(of: title) { _, _ in
             if !isRenaming {
                 renameDraft = title
@@ -556,6 +670,44 @@ private struct BucketChip: View {
 
         isRenaming = false
         isRenameFocused = false
+    }
+
+    private var backgroundFill: Color {
+        if didJustReceiveDrop {
+            return color.opacity(0.30)
+        }
+        if isDropTargeted {
+            return color.opacity(0.24)
+        }
+        return isSelected ? .white.opacity(0.18) : .white.opacity(0.08)
+    }
+
+    private var strokeColor: Color {
+        if isDropTargeted || didJustReceiveDrop {
+            return color.opacity(0.95)
+        }
+        return isSelected ? .white.opacity(0.42) : .white.opacity(0.24)
+    }
+
+    private var glowColor: Color {
+        if isDropTargeted || didJustReceiveDrop {
+            return color.opacity(0.42)
+        }
+        return .clear
+    }
+}
+
+private struct ActiveCardDrag {
+    let clipItemID: Int64
+    let title: String
+    var location: CGPoint
+}
+
+private struct BucketChipFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [Int64: CGRect] = [:]
+
+    static func reduce(value: inout [Int64: CGRect], nextValue: () -> [Int64: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
     }
 }
 
