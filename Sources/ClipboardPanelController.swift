@@ -8,6 +8,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
     private var panel: FloatingPanel?
     private var keyMonitor: Any?
+    private var didPrewarmPanel = false
 
     private let panelHeight: CGFloat = 360
 
@@ -33,6 +34,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     }
 
     func open() {
+        prewarm()
+
         let panel = ensurePanel()
         let targetFrame = frameForPanel(on: panel)
 
@@ -41,10 +44,11 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         startFrame.origin.y -= panelHeight + 20
 
         panel.setFrame(startFrame, display: false)
-        panel.alphaValue = 1
+        panel.alphaValue = 0
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        panel.contentView?.layoutSubtreeIfNeeded()
 
         installEventMonitors()
 
@@ -56,7 +60,17 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
             context.allowsImplicitAnimation = true
             panel.animator().setFrame(targetFrame, display: true)
+            panel.animator().alphaValue = 1
         }
+    }
+
+    func prewarm() {
+        guard !didPrewarmPanel else { return }
+
+        let panel = ensurePanel()
+        panel.setFrame(frameForPanel(on: panel), display: false)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        didPrewarmPanel = true
     }
 
     func close() {

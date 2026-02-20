@@ -17,7 +17,9 @@ struct ClipboardPanelView: View {
             topBar
                 .padding(.top, 4)
 
-            if filtered.isEmpty {
+            if store.isLoading {
+                loadingState
+            } else if filtered.isEmpty {
                 emptyState
             } else {
                 cardsView(filtered: filtered)
@@ -28,9 +30,6 @@ struct ClipboardPanelView: View {
         .shadow(color: .black.opacity(0.30), radius: 28, y: 4)
         .onAppear {
             isSearchFocused = true
-        }
-        .onChange(of: store.query) {
-            store.selectedIndex = 0
         }
     }
 
@@ -99,7 +98,8 @@ struct ClipboardPanelView: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 14) {
-                    ForEach(Array(filtered.enumerated()), id: \.element.id) { index, item in
+                    ForEach(filtered.indices, id: \.self) { index in
+                        let item = filtered[index]
                         ClipCardView(
                             item: item,
                             isSelected: store.selectedIndex == index,
@@ -121,15 +121,28 @@ struct ClipboardPanelView: View {
             }
             .onChange(of: store.selectedIndex) { _, newValue in
                 if filtered.indices.contains(newValue) {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        proxy.scrollTo(filtered[newValue].id, anchor: .center)
-                    }
+                    proxy.scrollTo(filtered[newValue].id)
                 }
             }
         }
     }
 
-    // MARK: - Empty state
+    // MARK: - States
+
+    private var loadingState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Loading history…")
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.92))
+
+            Text("Preparing your recent clips.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.60))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 12)
+    }
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {

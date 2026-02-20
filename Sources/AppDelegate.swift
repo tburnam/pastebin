@@ -32,15 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsPanelController = HotKeySettingsPanelController(hotKeyManager: hotKeyManager)
 
             setupStatusItem()
+            panelController.prewarm()
 
             hotKeyManager.onHotKeyPressed = { [weak self] in
                 self?.openClipboardPanel(nil)
             }
 
-            // Defer initial DB load off the launch critical path
-            DispatchQueue.main.async {
-                store.reloadFromDatabase(resetQuery: true)
-            }
+            // Defer initial DB load off the launch critical path.
+            store.reloadFromDatabaseAsync(resetQuery: true)
             monitor.start()
         } catch {
             assertionFailure("Failed to start PasteBin: \(error)")
@@ -70,6 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(item.content, forType: .string)
+
+        // Promote the selected history item to most-recent without creating duplicates.
+        store?.insert(
+            captured: CapturedClipboardItem(
+                content: item.content,
+                sourceBundleID: item.sourceBundleID,
+                sourceAppName: item.sourceAppName
+            )
+        )
     }
 
     private func setupStatusItem() {

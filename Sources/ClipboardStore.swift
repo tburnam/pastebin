@@ -3,55 +3,98 @@ import Foundation
 
 final class ClipboardStore: ObservableObject {
     @Published private(set) var items: [ClipItem] = []
-    @Published var query: String = ""
+    @Published var query: String = "" {
+        didSet {
+            guard query != oldValue else { return }
+            selectedIndex = 0
+            scheduleFiltering(debounce: query.isEmpty ? 0 : Self.searchDebounceInterval)
+        }
+    }
+    @Published private(set) var filteredItems: [ClipItem] = []
+    @Published private(set) var hasFinishedInitialLoad = false
     @Published var selectedIndex: Int = 0
 
     private let database: ClipboardDatabase
     private var iconCache: [String: NSImage] = [:]
     private var missingBundleIDs: Set<String> = []
 
+    private let filterQueue = DispatchQueue(label: "pastebin.search.queue", qos: .userInitiated)
+    private var pendingFilterWork: DispatchWorkItem?
+    private var filterRequestID: UInt64 = 0
+
+    private lazy var fallbackIconImage: NSImage? = {
+        let image = NSImage(systemSymbolName: "app.fill", accessibilityDescription: "Unknown app")
+        image?.size = NSSize(width: 28, height: 28)
+        return image
+    }()
+
+    private static let defaultLoadLimit = 4_000
+    private static let initialIconPreloadCount = 24
+    private static let unfilteredDisplayLimit = 1_200
+    private static let searchResultLimit = 250
+    private static let searchDebounceInterval: TimeInterval = 0.04
+
     init(database: ClipboardDatabase) {
         self.database = database
     }
 
+    deinit {
+        pendingFilterWork?.cancel()
+    }
+
     // MARK: - Derived state
 
-    var filteredItems: [ClipItem] {
-        FuzzyMatcher.filter(query: query, in: items)
+    var isLoading: Bool {
+        !hasFinishedInitialLoad
     }
 
     // MARK: - Data loading
 
-    func reloadFromDatabase(limit: Int = 1200, resetQuery: Bool = false) {
+    func reloadFromDatabase(limit: Int = ClipboardStore.defaultLoadLimit, resetQuery: Bool = false) {
         do {
             let loaded = try database.fetchRecent(limit: limit)
-            items = loaded
-            preloadIcons(for: Array(loaded.prefix(30)))
-
-            if resetQuery { query = "" }
-            selectedIndex = 0
-
-            if loaded.count > 30 {
-                let remaining = Array(loaded.dropFirst(30))
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    self?.preloadIconsBackground(for: remaining)
-                }
-            }
+            applyLoadedItems(loaded, resetQuery: resetQuery)
         } catch {
+            hasFinishedInitialLoad = true
             print("Failed loading clipboard DB: \(error)")
         }
     }
 
+    func reloadFromDatabaseAsync(limit: Int = ClipboardStore.defaultLoadLimit, resetQuery: Bool = false) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+
+            do {
+                let loaded = try self.database.fetchRecent(limit: limit)
+                DispatchQueue.main.async { [weak self] in
+                    self?.applyLoadedItems(loaded, resetQuery: resetQuery)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.hasFinishedInitialLoad = true
+                }
+                print("Failed loading clipboard DB: \(error)")
+            }
+        }
+    }
+
     func prepareForPresentation() {
-        query = ""
         selectedIndex = 0
+
+        if query.isEmpty {
+            scheduleFiltering(debounce: 0)
+        } else {
+            query = ""
+        }
     }
 
     func insert(captured: CapturedClipboardItem) {
         do {
             if items.first?.content == captured.content { return }
 
-            items.removeAll { $0.content == captured.content }
+            if let duplicateIndex = items.firstIndex(where: { $0.content == captured.content }) {
+                items.remove(at: duplicateIndex)
+            }
 
             let inserted = try database.insert(
                 content: captured.content,
@@ -60,7 +103,18 @@ final class ClipboardStore: ObservableObject {
             )
 
             items.insert(inserted, at: 0)
+
+            if items.count > Self.defaultLoadLimit {
+                items.removeLast(items.count - Self.defaultLoadLimit)
+            }
+
             preloadIcons(for: [inserted])
+
+            if query.isEmpty {
+                selectedIndex = 0
+            }
+
+            scheduleFiltering(debounce: 0)
         } catch {
             print("Failed inserting clipboard item: \(error)")
         }
@@ -70,26 +124,32 @@ final class ClipboardStore: ObservableObject {
 
     func moveSelection(delta: Int) {
         let count = filteredItems.count
-        guard count > 0 else { selectedIndex = 0; return }
+        guard count > 0 else {
+            selectedIndex = 0
+            return
+        }
+
         selectedIndex = (selectedIndex + delta + count) % count
     }
 
     func select(_ index: Int) {
         let count = filteredItems.count
-        guard count > 0 else { selectedIndex = 0; return }
+        guard count > 0 else {
+            selectedIndex = 0
+            return
+        }
+
         selectedIndex = min(max(index, 0), count - 1)
     }
 
     func selectedItem() -> ClipItem? {
-        let items = filteredItems
-        guard items.indices.contains(selectedIndex) else { return nil }
-        return items[selectedIndex]
+        guard filteredItems.indices.contains(selectedIndex) else { return nil }
+        return filteredItems[selectedIndex]
     }
 
     func item(at index: Int) -> ClipItem? {
-        let items = filteredItems
-        guard items.indices.contains(index) else { return nil }
-        return items[index]
+        guard filteredItems.indices.contains(index) else { return nil }
+        return filteredItems[index]
     }
 
     // MARK: - Icons
@@ -137,36 +197,66 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    private func preloadIconsBackground(for items: [ClipItem]) {
-        var newIcons: [String: NSImage] = [:]
-        var newMissing: Set<String> = []
+    private func fallbackIcon() -> NSImage? {
+        fallbackIconImage
+    }
 
-        for item in items {
-            guard let bundleID = item.sourceBundleID else { continue }
+    private func applyLoadedItems(_ loaded: [ClipItem], resetQuery: Bool) {
+        items = loaded
+        selectedIndex = 0
+        hasFinishedInitialLoad = true
 
-            if iconCache[bundleID] != nil || missingBundleIDs.contains(bundleID) || newIcons[bundleID] != nil || newMissing.contains(bundleID) {
-                continue
+        preloadIcons(for: Array(loaded.prefix(Self.initialIconPreloadCount)))
+
+        if resetQuery {
+            query = ""
+        }
+
+        scheduleFiltering(debounce: 0)
+    }
+
+    private func scheduleFiltering(debounce: TimeInterval) {
+        pendingFilterWork?.cancel()
+
+        filterRequestID &+= 1
+        let requestID = filterRequestID
+        let querySnapshot = query
+        let itemsSnapshot = items
+        let searchLimit = Self.searchResultLimit
+        let unfilteredLimit = Self.unfilteredDisplayLimit
+
+        let work = DispatchWorkItem { [weak self] in
+            let filtered: [ClipItem]
+            if FuzzyMatcher.normalize(querySnapshot).isEmpty {
+                filtered = Array(itemsSnapshot.prefix(unfilteredLimit))
+            } else {
+                filtered = FuzzyMatcher.filter(query: querySnapshot, in: itemsSnapshot, limit: searchLimit)
             }
 
-            if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-                let icon = NSWorkspace.shared.icon(forFile: appURL.path)
-                icon.size = NSSize(width: 28, height: 28)
-                newIcons[bundleID] = icon
-            } else {
-                newMissing.insert(bundleID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard requestID == self.filterRequestID else { return }
+
+                self.filteredItems = filtered
+                self.clampSelectedIndex()
             }
         }
 
-        guard !newIcons.isEmpty || !newMissing.isEmpty else { return }
+        pendingFilterWork = work
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.iconCache.merge(newIcons) { current, _ in current }
-            self.missingBundleIDs.formUnion(newMissing)
+        if debounce <= 0 {
+            filterQueue.async(execute: work)
+        } else {
+            filterQueue.asyncAfter(deadline: .now() + debounce, execute: work)
         }
     }
 
-    private func fallbackIcon() -> NSImage? {
-        NSImage(systemSymbolName: "app.fill", accessibilityDescription: "Unknown app")
+    private func clampSelectedIndex() {
+        guard !filteredItems.isEmpty else {
+            selectedIndex = 0
+            return
+        }
+
+        selectedIndex = min(max(selectedIndex, 0), filteredItems.count - 1)
     }
 }

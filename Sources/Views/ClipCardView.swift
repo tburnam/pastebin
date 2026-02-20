@@ -74,12 +74,7 @@ struct ClipCardView: View {
 
                 Spacer(minLength: 0)
 
-                if let icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 54, height: 54)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
+                appIcon
             }
             .padding(.leading, 14)
             .padding(.trailing, 8)
@@ -152,6 +147,24 @@ struct ClipCardView: View {
         }
 
         return Self.offBlackAccent
+    }
+
+    private var appIcon: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.black.opacity(0.28))
+
+            if let icon {
+                Image(nsImage: icon)
+                    .resizable()
+            } else {
+                Image(systemName: "app.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.44))
+            }
+        }
+        .frame(width: 54, height: 54)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 
     private var relativeCopiedTime: String {

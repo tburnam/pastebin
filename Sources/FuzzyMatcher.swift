@@ -4,6 +4,8 @@ enum FuzzyMatcher {
     private static let delimiterSet = CharacterSet.alphanumerics.inverted
 
     static func filter(query: String, in items: [ClipItem], limit: Int = 250) -> [ClipItem] {
+        guard limit > 0 else { return [] }
+
         let normalizedQuery = normalize(query)
 
         guard !normalizedQuery.isEmpty else {
@@ -16,36 +18,50 @@ enum FuzzyMatcher {
             .split(whereSeparator: { $0.unicodeScalars.allSatisfy { delimiterSet.contains($0) } })
             .map(String.init)
 
-        let strictMatches = items.filter { item in
-            queryTokens.allSatisfy { token in
-                item.searchableContent.contains(token)
-            }
-        }
+        if !queryTokens.isEmpty {
+            var strictMatches: [ClipItem] = []
+            strictMatches.reserveCapacity(min(limit, items.count))
 
-        if !strictMatches.isEmpty {
-            return Array(strictMatches.prefix(limit))
+            for item in items {
+                if queryTokens.allSatisfy({ token in
+                    item.searchableContent.contains(token)
+                }) {
+                    strictMatches.append(item)
+                    if strictMatches.count >= limit {
+                        break
+                    }
+                }
+            }
+
+            if !strictMatches.isEmpty {
+                return strictMatches
+            }
         }
 
         // Fallback: fuzzy subsequence matching for typo tolerance when strict search returns nothing.
         let queryCharacters = Array(normalizedQuery)
-        var matches: [(item: ClipItem, score: Int)] = []
-        matches.reserveCapacity(min(items.count, limit * 2))
+        var topMatches: [(item: ClipItem, score: Int)] = []
+        topMatches.reserveCapacity(min(items.count, limit))
 
         for item in items {
             if let score = score(query: queryCharacters, in: item.searchableContent) {
-                matches.append((item: item, score: score))
+                let candidate = (item: item, score: score)
+
+                if topMatches.count < limit {
+                    insertSorted(candidate, into: &topMatches)
+                    continue
+                }
+
+                if let weakestMatch = topMatches.last, outranks(candidate, than: weakestMatch) {
+                    insertSorted(candidate, into: &topMatches)
+                    if topMatches.count > limit {
+                        topMatches.removeLast()
+                    }
+                }
             }
         }
 
-        matches.sort { lhs, rhs in
-            if lhs.score != rhs.score {
-                return lhs.score > rhs.score
-            }
-
-            return lhs.item.copiedAt > rhs.item.copiedAt
-        }
-
-        return matches.prefix(limit).map(\.item)
+        return topMatches.map(\.item)
     }
 
     static func normalize(_ value: String) -> String {
@@ -99,6 +115,30 @@ enum FuzzyMatcher {
         }
 
         return nil
+    }
+
+    private static func insertSorted(
+        _ candidate: (item: ClipItem, score: Int),
+        into matches: inout [(item: ClipItem, score: Int)]
+    ) {
+        var insertionIndex = matches.count
+
+        while insertionIndex > 0 && outranks(candidate, than: matches[insertionIndex - 1]) {
+            insertionIndex -= 1
+        }
+
+        matches.insert(candidate, at: insertionIndex)
+    }
+
+    private static func outranks(
+        _ lhs: (item: ClipItem, score: Int),
+        than rhs: (item: ClipItem, score: Int)
+    ) -> Bool {
+        if lhs.score != rhs.score {
+            return lhs.score > rhs.score
+        }
+
+        return lhs.item.copiedAt > rhs.item.copiedAt
     }
 
     private static func isDelimiter(_ character: Character) -> Bool {
