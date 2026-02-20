@@ -35,21 +35,50 @@ struct ClipboardPanelView: View {
     }
 
     private var topBar: some View {
-        HStack {
-            Spacer(minLength: 0)
+        ViewThatFits(in: .horizontal) {
+            topBarInline
+            topBarStacked
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var topBarInline: some View {
+        HStack(spacing: 12) {
+            shortcutHints
+                .hidden()
+                .accessibilityHidden(true)
+                .allowsHitTesting(false)
+
             searchPill
-            Spacer(minLength: 0)
+                .frame(minWidth: 320, maxWidth: 580)
+                .frame(maxWidth: .infinity)
+
+            shortcutHints
         }
-        .overlay(alignment: .topTrailing) {
-            HStack(spacing: 14) {
-                hintLabel("\u{2190} \u{2192}", "navigate")
-                hintLabel("\u{21a9}", "copy")
-                hintLabel("\u{21e7}\u{21a9}", "paste")
-                hintLabel("\u{2318}1-9", "jump")
+    }
+
+    private var topBarStacked: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Spacer(minLength: 0)
+                searchPill
+                Spacer(minLength: 0)
             }
-            .offset(y: -2)
-            .padding(.trailing, 4)
+
+            HStack {
+                Spacer(minLength: 0)
+                shortcutHints
+            }
         }
+    }
+
+    private var shortcutHints: some View {
+        HStack(spacing: 14) {
+            hintLabel("\u{2190} \u{2192}", "navigate")
+            hintLabel("\u{21a9}", "copy")
+            hintLabel("\u{2318}1-9", "jump")
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func hintLabel(_ symbol: String, _ label: String) -> some View {

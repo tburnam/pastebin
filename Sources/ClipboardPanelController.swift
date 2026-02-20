@@ -181,13 +181,6 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             return true
         }
 
-        // Shift+Enter: copy, close, and paste into previous app
-        if event.modifierFlags.contains(.shift), !event.modifierFlags.contains(.command),
-           (event.keyCode == 36 || event.keyCode == 76) {
-            copySelectedItemAndPaste()
-            return true
-        }
-
         switch event.keyCode {
         case 123: // Left arrow
             store.moveSelection(delta: -1)
@@ -218,29 +211,6 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         onSelect(item)
         close()
-    }
-
-    private func copySelectedItemAndPaste() {
-        guard let item = store.selectedItem() else {
-            NSSound.beep()
-            return
-        }
-
-        onSelect(item)
-        close()
-
-        // After the panel closes and the previous app regains focus, simulate Cmd+V.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            let source = CGEventSource(stateID: .combinedSessionState)
-
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true)
-            keyDown?.flags = .maskCommand
-            keyDown?.post(tap: .cghidEventTap)
-
-            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false)
-            keyUp?.flags = .maskCommand
-            keyUp?.post(tap: .cghidEventTap)
-        }
     }
 
     private func activateItem(at index: Int) {
