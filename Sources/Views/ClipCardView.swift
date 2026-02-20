@@ -10,6 +10,7 @@ struct ClipCardView: View {
     let accentColorOverride: Color?
     let isTitleEditable: Bool
     let onTitleChange: ((String?) -> Void)?
+    let onTitleEditingStateChange: ((Bool) -> Void)?
     @ObservedObject var linkPreviewStore: LinkPreviewStore
 
     @State private var isEditingTitle = false
@@ -97,6 +98,11 @@ struct ClipCardView: View {
             guard !isEditingTitle else { return }
             titleDraft = item.customTitle ?? ""
         }
+        .onDisappear {
+            if isEditingTitle {
+                onTitleEditingStateChange?(false)
+            }
+        }
     }
 
     private var header: some View {
@@ -121,6 +127,13 @@ struct ClipCardView: View {
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(effectiveAccentColor)
+        .contentShape(Rectangle())
+        .highPriorityGesture(
+            TapGesture(count: 2).onEnded {
+                guard isTitleEditable else { return }
+                beginTitleEdit()
+            }
+        )
     }
 
     @ViewBuilder
@@ -348,8 +361,10 @@ struct ClipCardView: View {
     }
 
     private func beginTitleEdit() {
+        guard isTitleEditable, !isEditingTitle else { return }
         titleDraft = item.customTitle ?? item.typeLabel
         isEditingTitle = true
+        onTitleEditingStateChange?(true)
     }
 
     private func commitTitleEdit() {
@@ -360,6 +375,7 @@ struct ClipCardView: View {
 
         isEditingTitle = false
         isTitleFocused = false
+        onTitleEditingStateChange?(false)
         onTitleChange?(normalized)
     }
 }

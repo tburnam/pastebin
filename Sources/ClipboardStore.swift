@@ -6,6 +6,7 @@ final class ClipboardStore: ObservableObject {
     @Published private(set) var buckets: [Bucket] = []
     @Published private(set) var selectedBucketID: Int64?
     @Published var isSearchExpanded = false
+    @Published private(set) var isInlineTitleEditorActive = false
 
     @Published var query: String = "" {
         didSet {
@@ -129,6 +130,7 @@ final class ClipboardStore: ObservableObject {
         selectedIndex = 0
         isSearchExpanded = false
         selectedBucketID = nil
+        isInlineTitleEditorActive = false
         scopedBucketItems = []
 
         if query.isEmpty {
@@ -191,6 +193,11 @@ final class ClipboardStore: ObservableObject {
 
         isSearchExpanded = true
         query += sanitized
+    }
+
+    func setInlineTitleEditorActive(_ isActive: Bool) {
+        guard isInlineTitleEditorActive != isActive else { return }
+        isInlineTitleEditorActive = isActive
     }
 
     // MARK: - Scope and buckets

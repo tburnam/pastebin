@@ -169,6 +169,10 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
+        if store.isInlineTitleEditorActive {
+            return false
+        }
+
         // When search is collapsed and an inline text field (card/bucket rename) is active,
         // let the field own all keyboard input.
         if isCollapsedSearchInlineEditorActive() {

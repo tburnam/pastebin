@@ -16,6 +16,8 @@ struct ClipboardPanelView: View {
     private let panelRadius: CGFloat = 22
     private let edgePadding: CGFloat = 14
     private let topControlHeight: CGFloat = 38
+    private let chipVisualHeight: CGFloat = 29
+    private let searchToggleDiameter: CGFloat = 30
     private let dragCoordinateSpaceName = "clipboard-panel-drag-space"
 
     var body: some View {
@@ -100,9 +102,9 @@ struct ClipboardPanelView: View {
             }
         } label: {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12.5, weight: .semibold))
+                .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.82))
-                .frame(width: topControlHeight, height: topControlHeight)
+                .frame(width: searchToggleDiameter, height: searchToggleDiameter)
                 .background {
                     Circle()
                         .fill(.white.opacity(0.10))
@@ -158,6 +160,9 @@ struct ClipboardPanelView: View {
                     },
                     onRecolor: { newColorHex in
                         store.recolorBucket(bucketID: bucket.id, colorHex: newColorHex)
+                    },
+                    onRenameEditingStateChange: { isEditing in
+                        store.setInlineTitleEditorActive(isEditing)
                     }
                 )
                 .background {
@@ -216,7 +221,7 @@ struct ClipboardPanelView: View {
     private var searchPill: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 10.5, weight: .semibold))
+                .font(.system(size: 9.0, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.80))
 
             TextField("", text: $store.query, prompt:
@@ -229,7 +234,7 @@ struct ClipboardPanelView: View {
             .focused($isSearchFocused)
         }
         .padding(.horizontal, 12)
-        .frame(height: topControlHeight)
+        .frame(height: chipVisualHeight)
         .background {
             Capsule()
                 .fill(.white.opacity(0.10))
@@ -293,6 +298,9 @@ struct ClipboardPanelView: View {
                             isTitleEditable: isBucketScope,
                             onTitleChange: { title in
                                 store.updateTitleOverrideForSelectedBucket(clipItemID: item.id, title: title)
+                            },
+                            onTitleEditingStateChange: { isEditing in
+                                store.setInlineTitleEditorActive(isEditing)
                             },
                             linkPreviewStore: linkPreviewStore
                         )
@@ -532,6 +540,7 @@ private struct BucketChip: View {
     let onRename: (String) -> Void
     let onDelete: () -> Void
     let onRecolor: (String) -> Void
+    let onRenameEditingStateChange: ((Bool) -> Void)?
 
     @State private var isRenaming = false
     @State private var renameDraft = ""
@@ -578,6 +587,10 @@ private struct BucketChip: View {
                         .lineLimit(1)
                 }
                 .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    onTap()
+                    beginRename()
+                }
                 .onTapGesture {
                     onTap()
                 }
@@ -616,6 +629,11 @@ private struct BucketChip: View {
                 renameDraft = title
             }
         }
+        .onDisappear {
+            if isRenaming {
+                onRenameEditingStateChange?(false)
+            }
+        }
         .onExitCommand {
             if isRenaming {
                 cancelRename()
@@ -631,11 +649,10 @@ private struct BucketChip: View {
                     Button {
                         onRecolor(option.hex)
                     } label: {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(Color(hex: option.hex))
-                                .frame(width: 10, height: 10)
+                        Label {
                             Text(option.name)
+                        } icon: {
+                            Image(nsImage: colorDotImage(hex: option.hex))
                         }
                     }
                 }
@@ -648,14 +665,18 @@ private struct BucketChip: View {
     }
 
     private func beginRename() {
+        guard !isRenaming else { return }
         renameDraft = title
         isRenaming = true
+        onRenameEditingStateChange?(true)
     }
 
     private func cancelRename() {
+        guard isRenaming else { return }
         isRenaming = false
         isRenameFocused = false
         renameDraft = title
+        onRenameEditingStateChange?(false)
     }
 
     private func commitRename() {
@@ -670,6 +691,22 @@ private struct BucketChip: View {
 
         isRenaming = false
         isRenameFocused = false
+        onRenameEditingStateChange?(false)
+    }
+
+    private func colorDotImage(hex: String) -> NSImage {
+        let size = NSSize(width: 10, height: 10)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        let insetRect = NSRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(ovalIn: insetRect)
+        NSColor(Color(hex: hex)).setFill()
+        path.fill()
+
+        image.unlockFocus()
+        image.isTemplate = false
+        return image
     }
 
     private var backgroundFill: Color {
