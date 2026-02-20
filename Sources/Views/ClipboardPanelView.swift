@@ -27,7 +27,7 @@ struct ClipboardPanelView: View {
             topBar
                 .padding(.top, 4)
 
-            if store.isLoading {
+            if store.isLoading || (store.isBucketScopeLoading && filtered.isEmpty) {
                 loadingState
             } else if filtered.isEmpty {
                 emptyState
@@ -330,12 +330,14 @@ struct ClipboardPanelView: View {
     // MARK: - States
 
     private var loadingState: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Loading history…")
+        let isLoadingBucket = store.isBucketScopeLoading && !store.isLoading
+
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(isLoadingBucket ? "Loading bucket…" : "Loading history…")
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.92))
 
-            Text("Preparing your recent clips.")
+            Text(isLoadingBucket ? "Preparing bucket items." : "Preparing your recent clips.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.60))
         }

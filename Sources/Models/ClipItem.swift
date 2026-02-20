@@ -72,6 +72,7 @@ struct ClipItem: Identifiable, Equatable {
     }
 
     private static let surroundingPunctuation = CharacterSet(charactersIn: "<>[](){}\"'`.,;:!?")
+    private static let linkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
     private static func detectLinkURL(from text: String) -> URL? {
         guard !text.isEmpty else { return nil }
@@ -98,9 +99,7 @@ struct ClipItem: Identifiable, Equatable {
     }
 
     private static func dataDetectedURL(in candidate: String) -> URL? {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return nil
-        }
+        guard let detector = linkDetector else { return nil }
 
         let range = NSRange(location: 0, length: candidate.utf16.count)
         guard let match = detector.firstMatch(in: candidate, options: [], range: range),

@@ -1,4 +1,5 @@
 import Foundation
+import os.signpost
 import SQLite3
 
 enum AppPaths {
@@ -27,6 +28,10 @@ enum DatabaseError: Error {
 final class ClipboardDatabase {
     private let queue = DispatchQueue(label: "pastebin.sqlite.queue", qos: .userInitiated)
     private var db: OpaquePointer?
+    private let performanceLog = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "PasteBin",
+        category: "SQLitePerformance"
+    )
 
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -348,53 +353,89 @@ final class ClipboardDatabase {
     }
 
     func fetchItems(inBucket bucketID: Int64, limit: Int = 1200) throws -> [ClipItem] {
-        try queue.sync {
-            guard let db else {
-                throw DatabaseError.openFailed("SQLite handle is not available")
-            }
+        let signpostID = OSSignpostID(log: performanceLog)
+        os_signpost(
+            .begin,
+            log: performanceLog,
+            name: "SQLiteBucketFetch",
+            signpostID: signpostID,
+            "bucket=%{public}lld limit=%{public}d",
+            bucketID,
+            limit
+        )
 
-            let sql = """
-            SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
-            FROM bucket_items bi
-            INNER JOIN clip_items c ON c.id = bi.clip_item_id
-            WHERE bi.bucket_id = ?
-            ORDER BY bi.added_at DESC
-            LIMIT ?;
-            """
+        do {
+            let items = try queue.sync {
+                guard let db else {
+                    throw DatabaseError.openFailed("SQLite handle is not available")
+                }
 
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
-            }
-            defer { sqlite3_finalize(statement) }
+                let sql = """
+                SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
+                FROM bucket_items bi
+                INNER JOIN clip_items c ON c.id = bi.clip_item_id
+                WHERE bi.bucket_id = ?
+                ORDER BY bi.added_at DESC
+                LIMIT ?;
+                """
 
-            sqlite3_bind_int64(statement, 1, bucketID)
-            sqlite3_bind_int(statement, 2, Int32(limit))
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(statement) }
 
-            var items: [ClipItem] = []
-            items.reserveCapacity(limit)
+                sqlite3_bind_int64(statement, 1, bucketID)
+                sqlite3_bind_int(statement, 2, Int32(limit))
 
-            while sqlite3_step(statement) == SQLITE_ROW {
-                let id = sqlite3_column_int64(statement, 0)
-                let content = columnText(statement, index: 1) ?? ""
-                let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
-                let bundleID = columnText(statement, index: 3)
-                let appName = columnText(statement, index: 4)
-                let customTitle = columnText(statement, index: 5)
+                var items: [ClipItem] = []
+                items.reserveCapacity(limit)
 
-                items.append(
-                    ClipItem(
-                        id: id,
-                        content: content,
-                        copiedAt: copiedAt,
-                        sourceBundleID: bundleID,
-                        sourceAppName: appName,
-                        customTitle: customTitle
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    let id = sqlite3_column_int64(statement, 0)
+                    let content = columnText(statement, index: 1) ?? ""
+                    let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+                    let bundleID = columnText(statement, index: 3)
+                    let appName = columnText(statement, index: 4)
+                    let customTitle = columnText(statement, index: 5)
+
+                    items.append(
+                        ClipItem(
+                            id: id,
+                            content: content,
+                            copiedAt: copiedAt,
+                            sourceBundleID: bundleID,
+                            sourceAppName: appName,
+                            customTitle: customTitle
+                        )
                     )
-                )
+                }
+
+                return items
             }
 
+            os_signpost(
+                .end,
+                log: performanceLog,
+                name: "SQLiteBucketFetch",
+                signpostID: signpostID,
+                "bucket=%{public}lld rows=%{public}d",
+                bucketID,
+                items.count
+            )
             return items
+        } catch {
+            os_signpost(
+                .end,
+                log: performanceLog,
+                name: "SQLiteBucketFetch",
+                signpostID: signpostID,
+                "bucket=%{public}lld rows=%{public}d error=%{public}d",
+                bucketID,
+                -1,
+                1
+            )
+            throw error
         }
     }
 

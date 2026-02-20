@@ -4,9 +4,11 @@ enum FuzzyMatcher {
     private static let delimiterSet = CharacterSet.alphanumerics.inverted
 
     static func filter(query: String, in items: [ClipItem], limit: Int = 250) -> [ClipItem] {
-        guard limit > 0 else { return [] }
+        filter(normalizedQuery: normalize(query), in: items, limit: limit)
+    }
 
-        let normalizedQuery = normalize(query)
+    static func filter(normalizedQuery: String, in items: [ClipItem], limit: Int = 250) -> [ClipItem] {
+        guard limit > 0 else { return [] }
 
         guard !normalizedQuery.isEmpty else {
             return items
