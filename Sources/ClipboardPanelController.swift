@@ -36,8 +36,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         let panel = ensurePanel()
         let targetFrame = frameForPanel(on: panel)
 
-        panel.setFrame(targetFrame, display: false)
-        panel.alphaValue = 0
+        // Start below the bottom screen edge
+        var startFrame = targetFrame
+        startFrame.origin.y -= panelHeight + 20
+
+        panel.setFrame(startFrame, display: false)
+        panel.alphaValue = 1
 
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
@@ -46,10 +50,12 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         store.prepareForPresentation()
 
+        // Snappy spring-like slide up
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.10
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().alphaValue = 1
+            context.duration = 0.32
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+            context.allowsImplicitAnimation = true
+            panel.animator().setFrame(targetFrame, display: true)
         }
     }
 
@@ -60,12 +66,19 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         removeEventMonitors()
 
+        // Slide down below screen edge
+        var offscreenFrame = panel.frame
+        offscreenFrame.origin.y -= panelHeight + 20
+
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 1, 1)
+            context.allowsImplicitAnimation = true
+            panel.animator().setFrame(offscreenFrame, display: true)
             panel.animator().alphaValue = 0
         } completionHandler: {
             panel.orderOut(nil)
+            panel.alphaValue = 1
         }
     }
 
