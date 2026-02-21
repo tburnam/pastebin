@@ -28,6 +28,7 @@ final class ClipboardStore: ObservableObject {
     private let database: ClipboardDatabase
     private var scopedBucketItems: [ClipItem] = []
     private var cachedBucketItemsByID: [Int64: [ClipItem]] = [:]
+    private var partialBucketCacheIDs: Set<Int64> = []
     private var inFlightBucketCacheLoads: Set<Int64> = []
     private var selectedBucketLoadRequestID: UInt64 = 0
 
@@ -52,10 +53,16 @@ final class ClipboardStore: ObservableObject {
     }()
 
     private static let defaultLoadLimit = 4_000
+    private static let prewarmLoadLimit = 50
     private static let initialIconPreloadCount = 24
     private static let unfilteredDisplayLimit = 1_200
     private static let searchResultLimit = 250
     private static let searchDebounceInterval: TimeInterval = 0.04
+
+    private enum BucketFetchMode {
+        case background
+        case interaction
+    }
 
     init(database: ClipboardDatabase) {
         self.database = database
@@ -228,10 +235,12 @@ final class ClipboardStore: ObservableObject {
     func showBucketScope(bucketID: Int64) {
         guard selectedBucketID != bucketID else { return }
         selectedBucketLoadRequestID &+= 1
+        let requestID = selectedBucketLoadRequestID
         selectedBucketID = bucketID
         selectedIndex = 0
 
         if let cached = cachedBucketItemsByID[bucketID] {
+            let isPartial = partialBucketCacheIDs.contains(bucketID)
             scopedBucketItems = cached
             isBucketScopeLoading = false
             os_signpost(
@@ -241,10 +250,14 @@ final class ClipboardStore: ObservableObject {
                 "scope=%{public}@ bucket=%{public}lld cache=%{public}@ rows=%{public}d",
                 "bucket",
                 bucketID,
-                "hit",
+                isPartial ? "partial" : "hit",
                 cached.count
             )
             scheduleFiltering(debounce: 0)
+
+            if isPartial {
+                loadFullBucketInBackground(bucketID: bucketID)
+            }
             return
         }
 
@@ -261,11 +274,83 @@ final class ClipboardStore: ObservableObject {
         )
         scheduleFiltering(debounce: 0)
 
-        if inFlightBucketCacheLoads.contains(bucketID) {
-            return
-        }
+        let quickFetchSignpostID = OSSignpostID(log: performanceLog)
+        let perfLog = performanceLog
+        os_signpost(
+            .begin,
+            log: perfLog,
+            name: "BucketFetchQuickPage",
+            signpostID: quickFetchSignpostID,
+            "bucket=%{public}lld request=%{public}llu",
+            bucketID,
+            requestID
+        )
 
-        reloadSelectedBucketItems()
+        fetchBucketItemsAsync(
+            bucketID: bucketID,
+            qos: .userInitiated,
+            limit: Self.prewarmLoadLimit,
+            mode: .interaction
+        ) { [weak self] result in
+            var rowCount = -1
+            var applied = 0
+            defer {
+                os_signpost(
+                    .end,
+                    log: perfLog,
+                    name: "BucketFetchQuickPage",
+                    signpostID: quickFetchSignpostID,
+                    "bucket=%{public}lld request=%{public}llu rows=%{public}d applied=%{public}d",
+                    bucketID,
+                    requestID,
+                    rowCount,
+                    applied
+                )
+            }
+
+            guard let self else { return }
+            guard self.buckets.contains(where: { $0.id == bucketID }) else { return }
+
+            switch result {
+            case .success(let quickPage):
+                rowCount = quickPage.count
+                let isPartial = quickPage.count >= Self.prewarmLoadLimit
+                self.cachedBucketItemsByID[bucketID] = quickPage
+                if isPartial {
+                    self.partialBucketCacheIDs.insert(bucketID)
+                } else {
+                    self.partialBucketCacheIDs.remove(bucketID)
+                }
+                self.preloadIcons(for: Array(quickPage.prefix(Self.initialIconPreloadCount)))
+
+                guard requestID == self.selectedBucketLoadRequestID,
+                      self.selectedBucketID == bucketID else {
+                    return
+                }
+
+                self.scopedBucketItems = quickPage
+                self.isBucketScopeLoading = false
+                self.scheduleFiltering(debounce: 0)
+                applied = 1
+
+                if isPartial {
+                    self.loadFullBucketInBackground(bucketID: bucketID)
+                }
+            case .failure(let error):
+                print("Failed loading bucket quick page: \(error)")
+
+                guard requestID == self.selectedBucketLoadRequestID,
+                      self.selectedBucketID == bucketID else {
+                    return
+                }
+
+                self.scopedBucketItems = []
+                self.isBucketScopeLoading = true
+                self.scheduleFiltering(debounce: 0)
+                self.reloadSelectedBucketItems()
+                applied = 1
+            }
+        }
     }
 
     func createBucketAndSelect() {
@@ -315,6 +400,7 @@ final class ClipboardStore: ObservableObject {
 
             buckets.removeAll(where: { $0.id == bucketID })
             cachedBucketItemsByID[bucketID] = nil
+            partialBucketCacheIDs.remove(bucketID)
             inFlightBucketCacheLoads.remove(bucketID)
             if selectedBucketID == bucketID {
                 selectedBucketLoadRequestID &+= 1
@@ -333,6 +419,7 @@ final class ClipboardStore: ObservableObject {
         do {
             try database.addClipToBucket(clipItemID: clipItemID, bucketID: bucketID)
             cachedBucketItemsByID[bucketID] = nil
+            partialBucketCacheIDs.remove(bucketID)
             inFlightBucketCacheLoads.remove(bucketID)
 
             if selectedBucketID == bucketID {
@@ -542,6 +629,7 @@ final class ClipboardStore: ObservableObject {
 
         let validBucketIDs = Set(loadedBuckets.map(\.id))
         cachedBucketItemsByID = cachedBucketItemsByID.filter { validBucketIDs.contains($0.key) }
+        partialBucketCacheIDs = partialBucketCacheIDs.filter { validBucketIDs.contains($0) }
         inFlightBucketCacheLoads = inFlightBucketCacheLoads.filter { validBucketIDs.contains($0) }
 
         if let selectedBucketID {
@@ -735,12 +823,19 @@ final class ClipboardStore: ObservableObject {
     private func fetchBucketItemsAsync(
         bucketID: Int64,
         qos: DispatchQoS.QoSClass,
+        limit: Int = defaultLoadLimit,
+        mode: BucketFetchMode = .background,
         completion: @escaping (Result<[ClipItem], Error>) -> Void
     ) {
         bucketLoadQueue.async(qos: DispatchQoS(qosClass: qos, relativePriority: 0)) { [weak self] in
             guard let self else { return }
             let result: Result<[ClipItem], Error> = Result {
-                try self.database.fetchItems(inBucket: bucketID, limit: Self.defaultLoadLimit)
+                switch mode {
+                case .background:
+                    return try self.database.fetchItems(inBucket: bucketID, limit: limit)
+                case .interaction:
+                    return try self.database.fetchItemsForInteraction(inBucket: bucketID, limit: limit)
+                }
             }
 
             DispatchQueue.main.async {
@@ -771,7 +866,7 @@ final class ClipboardStore: ObservableObject {
             bucketID
         )
 
-        fetchBucketItemsAsync(bucketID: bucketID, qos: .utility) { [weak self] result in
+        fetchBucketItemsAsync(bucketID: bucketID, qos: .utility, limit: Self.prewarmLoadLimit) { [weak self] result in
             var rowCount = -1
             var appliedToVisibleScope = 0
             defer {
@@ -795,6 +890,9 @@ final class ClipboardStore: ObservableObject {
             rowCount = bucketItems.count
 
             self.cachedBucketItemsByID[bucketID] = bucketItems
+            if bucketItems.count >= Self.prewarmLoadLimit {
+                self.partialBucketCacheIDs.insert(bucketID)
+            }
             self.preloadIcons(for: Array(bucketItems.prefix(Self.initialIconPreloadCount)))
 
             guard self.selectedBucketID == bucketID, self.isBucketScopeLoading else {
@@ -805,6 +903,55 @@ final class ClipboardStore: ObservableObject {
             self.isBucketScopeLoading = false
             self.scheduleFiltering(debounce: 0)
             appliedToVisibleScope = 1
+
+            if self.partialBucketCacheIDs.contains(bucketID) {
+                self.loadFullBucketInBackground(bucketID: bucketID)
+            }
+        }
+    }
+
+    private func loadFullBucketInBackground(bucketID: Int64) {
+        guard !inFlightBucketCacheLoads.contains(bucketID) else { return }
+        inFlightBucketCacheLoads.insert(bucketID)
+        let perfLog = performanceLog
+        let signpostID = OSSignpostID(log: perfLog)
+        os_signpost(
+            .begin,
+            log: perfLog,
+            name: "BucketFetchFullUpgrade",
+            signpostID: signpostID,
+            "bucket=%{public}lld",
+            bucketID
+        )
+
+        fetchBucketItemsAsync(bucketID: bucketID, qos: .utility) { [weak self] result in
+            var rowCount = -1
+            defer {
+                os_signpost(
+                    .end,
+                    log: perfLog,
+                    name: "BucketFetchFullUpgrade",
+                    signpostID: signpostID,
+                    "bucket=%{public}lld rows=%{public}d",
+                    bucketID,
+                    rowCount
+                )
+            }
+
+            guard let self else { return }
+            self.inFlightBucketCacheLoads.remove(bucketID)
+
+            guard case .success(let bucketItems) = result else { return }
+            guard self.buckets.contains(where: { $0.id == bucketID }) else { return }
+            rowCount = bucketItems.count
+
+            self.cachedBucketItemsByID[bucketID] = bucketItems
+            self.partialBucketCacheIDs.remove(bucketID)
+            self.preloadIcons(for: Array(bucketItems.prefix(Self.initialIconPreloadCount)))
+
+            guard self.selectedBucketID == bucketID else { return }
+            self.scopedBucketItems = bucketItems
+            self.scheduleFiltering(debounce: 0)
         }
     }
 

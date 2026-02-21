@@ -578,24 +578,25 @@ private struct BucketChip: View {
                         }
                 }
             } else {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 9, height: 9)
+                Button(action: onTap) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 9, height: 9)
 
-                    Text(title)
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
-                        .lineLimit(1)
+                        Text(title)
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) {
-                    onTap()
-                    beginRename()
-                }
-                .onTapGesture {
-                    onTap()
-                }
+                .buttonStyle(.plain)
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        beginRename()
+                    }
+                )
             }
         }
         .padding(.horizontal, 10)

@@ -27,7 +27,10 @@ enum DatabaseError: Error {
 
 final class ClipboardDatabase {
     private let queue = DispatchQueue(label: "pastebin.sqlite.queue", qos: .userInitiated)
+    private let interactiveReadQueue = DispatchQueue(label: "pastebin.sqlite.interactive-read.queue", qos: .userInitiated)
     private var db: OpaquePointer?
+    private var interactiveReadDB: OpaquePointer?
+    private let databasePath: String
     private let performanceLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "PasteBin",
         category: "SQLitePerformance"
@@ -38,10 +41,12 @@ final class ClipboardDatabase {
     private static let latestUserVersion: Int32 = 2
 
     init(url: URL) throws {
+        databasePath = url.path
+
         var handle: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
 
-        guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK, let handle else {
+        guard sqlite3_open_v2(databasePath, &handle, flags, nil) == SQLITE_OK, let handle else {
             let message = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown SQLite open error"
             if let handle {
                 sqlite3_close(handle)
@@ -69,7 +74,12 @@ final class ClipboardDatabase {
             try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_content ON clip_items(content);")
 
             try runMigrationsIfNeeded()
+            try openInteractiveReadConnection()
         } catch {
+            if let interactiveReadDB {
+                sqlite3_close(interactiveReadDB)
+                self.interactiveReadDB = nil
+            }
             sqlite3_close(handle)
             db = nil
             throw error
@@ -79,6 +89,9 @@ final class ClipboardDatabase {
     deinit {
         if let db {
             sqlite3_close(db)
+        }
+        if let interactiveReadDB {
+            sqlite3_close(interactiveReadDB)
         }
     }
 
@@ -369,49 +382,7 @@ final class ClipboardDatabase {
                 guard let db else {
                     throw DatabaseError.openFailed("SQLite handle is not available")
                 }
-
-                let sql = """
-                SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
-                FROM bucket_items bi
-                INNER JOIN clip_items c ON c.id = bi.clip_item_id
-                WHERE bi.bucket_id = ?
-                ORDER BY bi.added_at DESC
-                LIMIT ?;
-                """
-
-                var statement: OpaquePointer?
-                guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-                    throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
-                }
-                defer { sqlite3_finalize(statement) }
-
-                sqlite3_bind_int64(statement, 1, bucketID)
-                sqlite3_bind_int(statement, 2, Int32(limit))
-
-                var items: [ClipItem] = []
-                items.reserveCapacity(limit)
-
-                while sqlite3_step(statement) == SQLITE_ROW {
-                    let id = sqlite3_column_int64(statement, 0)
-                    let content = columnText(statement, index: 1) ?? ""
-                    let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
-                    let bundleID = columnText(statement, index: 3)
-                    let appName = columnText(statement, index: 4)
-                    let customTitle = columnText(statement, index: 5)
-
-                    items.append(
-                        ClipItem(
-                            id: id,
-                            content: content,
-                            copiedAt: copiedAt,
-                            sourceBundleID: bundleID,
-                            sourceAppName: appName,
-                            customTitle: customTitle
-                        )
-                    )
-                }
-
-                return items
+                return try fetchItems(inBucket: bucketID, limit: limit, using: db)
             }
 
             os_signpost(
@@ -429,6 +400,55 @@ final class ClipboardDatabase {
                 .end,
                 log: performanceLog,
                 name: "SQLiteBucketFetch",
+                signpostID: signpostID,
+                "bucket=%{public}lld rows=%{public}d error=%{public}d",
+                bucketID,
+                -1,
+                1
+            )
+            throw error
+        }
+    }
+
+    func fetchItemsForInteraction(inBucket bucketID: Int64, limit: Int = 1200) throws -> [ClipItem] {
+        let signpostID = OSSignpostID(log: performanceLog)
+        os_signpost(
+            .begin,
+            log: performanceLog,
+            name: "SQLiteBucketFetchInteractive",
+            signpostID: signpostID,
+            "bucket=%{public}lld limit=%{public}d",
+            bucketID,
+            limit
+        )
+
+        do {
+            let items = try interactiveReadQueue.sync {
+                if let interactiveReadDB {
+                    return try fetchItems(inBucket: bucketID, limit: limit, using: interactiveReadDB)
+                }
+
+                guard let db else {
+                    throw DatabaseError.openFailed("SQLite handle is not available")
+                }
+                return try fetchItems(inBucket: bucketID, limit: limit, using: db)
+            }
+
+            os_signpost(
+                .end,
+                log: performanceLog,
+                name: "SQLiteBucketFetchInteractive",
+                signpostID: signpostID,
+                "bucket=%{public}lld rows=%{public}d",
+                bucketID,
+                items.count
+            )
+            return items
+        } catch {
+            os_signpost(
+                .end,
+                log: performanceLog,
+                name: "SQLiteBucketFetchInteractive",
                 signpostID: signpostID,
                 "bucket=%{public}lld rows=%{public}d error=%{public}d",
                 bucketID,
@@ -534,6 +554,66 @@ final class ClipboardDatabase {
         if version < Self.latestUserVersion {
             try execute("PRAGMA user_version = \(Self.latestUserVersion);")
         }
+    }
+
+    private func openInteractiveReadConnection() throws {
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+
+        guard sqlite3_open_v2(databasePath, &handle, flags, nil) == SQLITE_OK, let handle else {
+            let message = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "Unknown SQLite open error"
+            if let handle {
+                sqlite3_close(handle)
+            }
+            throw DatabaseError.openFailed(message)
+        }
+
+        interactiveReadDB = handle
+    }
+
+    private func fetchItems(inBucket bucketID: Int64, limit: Int, using db: OpaquePointer) throws -> [ClipItem] {
+        let sql = """
+        SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
+        FROM bucket_items bi
+        INNER JOIN clip_items c ON c.id = bi.clip_item_id
+        WHERE bi.bucket_id = ?
+        ORDER BY bi.added_at DESC
+        LIMIT ?;
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_int64(statement, 1, bucketID)
+        sqlite3_bind_int(statement, 2, Int32(limit))
+
+        var items: [ClipItem] = []
+        items.reserveCapacity(limit)
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let id = sqlite3_column_int64(statement, 0)
+            let content = columnText(statement, index: 1) ?? ""
+            let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+            let bundleID = columnText(statement, index: 3)
+            let appName = columnText(statement, index: 4)
+            let customTitle = columnText(statement, index: 5)
+
+            items.append(
+                ClipItem(
+                    id: id,
+                    content: content,
+                    copiedAt: copiedAt,
+                    sourceBundleID: bundleID,
+                    sourceAppName: appName,
+                    customTitle: customTitle
+                )
+            )
+        }
+
+        return items
     }
 
     private func existingClipID(forContent content: String, db: OpaquePointer) throws -> Int64? {
