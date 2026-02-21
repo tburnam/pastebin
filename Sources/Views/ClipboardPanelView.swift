@@ -12,6 +12,7 @@ struct ClipboardPanelView: View {
     @State private var hoveredBucketID: Int64?
     @State private var dropPulseBucketID: Int64?
     @State private var bucketFrames: [Int64: CGRect] = [:]
+    @State private var bucketStripContentWidth: CGFloat = 0
     @State private var shortcutHintsWidth: CGFloat = 0
 
     private let panelRadius: CGFloat = 22
@@ -86,7 +87,11 @@ struct ClipboardPanelView: View {
         .onPreferenceChange(ShortcutHintsWidthPreferenceKey.self) { width in
             shortcutHintsWidth = width
         }
+        .onPreferenceChange(BucketStripContentWidthPreferenceKey.self) { width in
+            bucketStripContentWidth = width
+        }
         .animation(.snappy(duration: 0.2), value: store.isSearchExpanded)
+        .animation(.snappy(duration: 0.18), value: bucketStripContentWidth)
     }
 
     private func centeredTopControls(maxControlsWidth: CGFloat) -> some View {
@@ -158,7 +163,7 @@ struct ClipboardPanelView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 bucketChipsRow
             }
-            .scrollClipDisabled()
+            .scrollClipDisabled(!store.isSearchExpanded)
             .onChange(of: store.selectedBucketID) { _, selectedBucketID in
                 guard let selectedBucketID else { return }
                 withAnimation(.snappy(duration: 0.22)) {
@@ -170,7 +175,10 @@ struct ClipboardPanelView: View {
 
     private var bucketChipsRow: some View {
         HStack(spacing: 8) {
-            ClipboardBucketChip(isSelected: store.isShowingClipboard) {
+            ClipboardBucketChip(
+                isSelected: store.isShowingClipboard,
+                prefersCollapsedStyle: store.isSearchExpanded
+            ) {
                 store.showClipboardScope()
             }
 
@@ -209,10 +217,29 @@ struct ClipboardPanelView: View {
                 }
             }
         }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: BucketStripContentWidthPreferenceKey.self,
+                    value: proxy.size.width
+                )
+            }
+        }
     }
 
     private func bucketStripWidth(maxControlsWidth: CGFloat) -> CGFloat {
-        var estimated: CGFloat = estimatedClipboardChipWidth
+        let estimated = estimatedBucketStripContentWidth
+        let contentWidth = max(bucketStripContentWidth, estimated)
+
+        let fixedControlsWidth = (store.isSearchExpanded ? searchPillWidth : searchToggleDiameter) + 8 + 4 + 22
+        let maxAvailableForStrip = max(120, maxControlsWidth - fixedControlsWidth)
+        return min(contentWidth, maxAvailableForStrip)
+    }
+
+    private var estimatedBucketStripContentWidth: CGFloat {
+        var estimated: CGFloat = store.isSearchExpanded
+            ? estimatedCollapsedClipboardChipWidth
+            : estimatedClipboardChipWidth
 
         for bucket in store.buckets {
             let bucketWidth = store.isSearchExpanded
@@ -221,9 +248,7 @@ struct ClipboardPanelView: View {
             estimated += 8 + bucketWidth
         }
 
-        let fixedControlsWidth = (store.isSearchExpanded ? searchPillWidth : searchToggleDiameter) + 8 + 4 + 22
-        let maxAvailableForStrip = max(120, maxControlsWidth - fixedControlsWidth)
-        return min(estimated, maxAvailableForStrip)
+        return estimated
     }
 
     private var estimatedClipboardChipWidth: CGFloat {
@@ -234,6 +259,11 @@ struct ClipboardPanelView: View {
     private var estimatedCollapsedBucketChipWidth: CGFloat {
         // dot + tap target buffer
         18
+    }
+
+    private var estimatedCollapsedClipboardChipWidth: CGFloat {
+        // icon + compact tap target buffer
+        22
     }
 
     private func estimatedExpandedBucketChipWidth(title: String) -> CGFloat {
@@ -552,34 +582,51 @@ struct ClipboardPanelView: View {
 
 private struct ClipboardBucketChip: View {
     let isSelected: Bool
+    let prefersCollapsedStyle: Bool
     let onTap: () -> Void
     private let chipHeight: CGFloat = 27
 
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 6) {
+            HStack(spacing: shouldShowExpandedVisual ? 6 : 0) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.78))
 
-                Text("Clipboard")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.80))
-                    .lineLimit(1)
+                if shouldShowExpandedVisual {
+                    Text("Clipboard")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.80))
+                        .lineLimit(1)
+                }
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
+            .frame(minWidth: shouldShowExpandedVisual ? 0 : 22, alignment: shouldShowExpandedVisual ? .leading : .center)
             .frame(height: chipHeight)
             .background {
                 Capsule()
                     .fill(isSelected ? .white.opacity(0.18) : .white.opacity(0.08))
+                    .opacity(shouldShowExpandedVisual ? 1 : 0)
             }
             .overlay {
                 Capsule()
                     .stroke(isSelected ? .white.opacity(0.42) : .white.opacity(0.24), lineWidth: 0.8)
+                    .opacity(shouldShowExpandedVisual ? 1 : 0)
+            }
+            .overlay {
+                if isSelected && !shouldShowExpandedVisual {
+                    Circle()
+                        .stroke(.white.opacity(0.56), lineWidth: 1.0)
+                        .frame(width: 15, height: 15)
+                }
             }
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+    }
+
+    private var shouldShowExpandedVisual: Bool {
+        !prefersCollapsedStyle
     }
 }
 
@@ -878,6 +925,14 @@ private struct BucketChipFramePreferenceKey: PreferenceKey {
 }
 
 private struct ShortcutHintsWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct BucketStripContentWidthPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
