@@ -630,6 +630,9 @@ private struct BucketChip: View {
                             }
                         }
                 }
+                .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
+                .frame(minWidth: 18, alignment: shouldShowExpandedVisual ? .leading : .center)
+                .frame(height: chipHeight)
             } else {
                 Button(action: onTap) {
                     HStack(spacing: shouldShowExpandedVisual ? 6 : 0) {
@@ -645,6 +648,9 @@ private struct BucketChip: View {
                                 .transition(.move(edge: .trailing).combined(with: .opacity))
                         }
                     }
+                    .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
+                    .frame(minWidth: 18, alignment: shouldShowExpandedVisual ? .leading : .center)
+                    .frame(height: chipHeight)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -655,9 +661,6 @@ private struct BucketChip: View {
                 )
             }
         }
-        .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
-        .frame(minWidth: 18, alignment: shouldShowExpandedVisual ? .leading : .center)
-        .frame(height: chipHeight)
         .background {
             Capsule()
                 .fill(backgroundFill)

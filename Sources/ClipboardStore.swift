@@ -661,8 +661,7 @@ final class ClipboardStore: ObservableObject {
         let unfilteredLimit = Self.unfilteredDisplayLimit
         let perfLog = performanceLog
         let filterSignpostID = OSSignpostID(log: perfLog)
-
-        let work = DispatchWorkItem { [weak self] in
+        let computeFiltered: () -> [ClipItem] = {
             os_signpost(
                 .begin,
                 log: perfLog,
@@ -691,6 +690,39 @@ final class ClipboardStore: ObservableObject {
                 requestID,
                 filtered.count
             )
+
+            return filtered
+        }
+
+        if debounce <= 0, Thread.isMainThread {
+            let filtered = computeFiltered()
+            let applySignpostID = OSSignpostID(log: perfLog)
+            os_signpost(
+                .begin,
+                log: perfLog,
+                name: "FilterApply",
+                signpostID: applySignpostID,
+                "request=%{public}llu",
+                requestID
+            )
+
+            filteredItems = filtered
+            clampSelectedIndex()
+
+            os_signpost(
+                .end,
+                log: perfLog,
+                name: "FilterApply",
+                signpostID: applySignpostID,
+                "request=%{public}llu results=%{public}d",
+                requestID,
+                filtered.count
+            )
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            let filtered = computeFiltered()
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
