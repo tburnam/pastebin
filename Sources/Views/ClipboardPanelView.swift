@@ -12,6 +12,7 @@ struct ClipboardPanelView: View {
     @State private var hoveredBucketID: Int64?
     @State private var dropPulseBucketID: Int64?
     @State private var bucketFrames: [Int64: CGRect] = [:]
+    @State private var shortcutHintsWidth: CGFloat = 0
 
     private let panelRadius: CGFloat = 22
     private let edgePadding: CGFloat = 14
@@ -19,6 +20,7 @@ struct ClipboardPanelView: View {
     private let chipVisualHeight: CGFloat = 29
     private let searchToggleDiameter: CGFloat = 30
     private let dragCoordinateSpaceName = "clipboard-panel-drag-space"
+    private let searchPillWidth: CGFloat = 236
 
     var body: some View {
         let filtered = store.filteredItems
@@ -60,37 +62,57 @@ struct ClipboardPanelView: View {
     }
 
     private var topBar: some View {
-        ZStack(alignment: .trailing) {
-            centeredTopControls
-            shortcutHints
-                .padding(.trailing, 2)
+        GeometryReader { proxy in
+            let reservedTrailingSpace = max(shortcutHintsWidth, 170) + 14
+            let maxControlsWidth = max(220, proxy.size.width - reservedTrailingSpace)
+
+            ZStack(alignment: .trailing) {
+                centeredTopControls(maxControlsWidth: maxControlsWidth)
+
+                shortcutHints
+                    .padding(.trailing, 2)
+                    .background {
+                        GeometryReader { hintProxy in
+                            Color.clear.preference(
+                                key: ShortcutHintsWidthPreferenceKey.self,
+                                value: hintProxy.size.width
+                            )
+                        }
+                    }
+            }
         }
+        .frame(height: topControlHeight)
         .padding(.horizontal, 4)
+        .onPreferenceChange(ShortcutHintsWidthPreferenceKey.self) { width in
+            shortcutHintsWidth = width
+        }
         .animation(.snappy(duration: 0.2), value: store.isSearchExpanded)
     }
 
-    private var centeredTopControls: some View {
-        HStack(spacing: 8) {
+    private func centeredTopControls(maxControlsWidth: CGFloat) -> some View {
+        let stripWidth = bucketStripWidth(maxControlsWidth: maxControlsWidth)
+
+        return HStack(spacing: 8) {
             if !store.isSearchExpanded {
                 searchToggleButton
             }
 
             if store.isSearchExpanded {
                 searchPill
-                    .frame(width: 236)
+                    .frame(width: searchPillWidth)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
             HStack(spacing: 4) {
                 bucketStrip
-                    .frame(width: bucketStripWidth)
+                    .frame(width: stripWidth, alignment: .leading)
 
                 addBucketButton
             }
         }
         .frame(height: topControlHeight)
-        .fixedSize(horizontal: true, vertical: false)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: maxControlsWidth, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var searchToggleButton: some View {
@@ -115,6 +137,7 @@ struct ClipboardPanelView: View {
                 }
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 
     private var addBucketButton: some View {
@@ -131,8 +154,17 @@ struct ClipboardPanelView: View {
     }
 
     private var bucketStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            bucketChipsRow
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                bucketChipsRow
+            }
+            .scrollClipDisabled()
+            .onChange(of: store.selectedBucketID) { _, selectedBucketID in
+                guard let selectedBucketID else { return }
+                withAnimation(.snappy(duration: 0.22)) {
+                    proxy.scrollTo(selectedBucketID, anchor: .center)
+                }
+            }
         }
     }
 
@@ -163,8 +195,10 @@ struct ClipboardPanelView: View {
                     },
                     onRenameEditingStateChange: { isEditing in
                         store.setInlineTitleEditorActive(isEditing)
-                    }
+                    },
+                    prefersCollapsedStyle: store.isSearchExpanded
                 )
+                .id(bucket.id)
                 .background {
                     GeometryReader { proxy in
                         Color.clear.preference(
@@ -177,14 +211,19 @@ struct ClipboardPanelView: View {
         }
     }
 
-    private var bucketStripWidth: CGFloat {
+    private func bucketStripWidth(maxControlsWidth: CGFloat) -> CGFloat {
         var estimated: CGFloat = estimatedClipboardChipWidth
 
-        for _ in store.buckets {
-            estimated += 8 + estimatedCollapsedBucketChipWidth
+        for bucket in store.buckets {
+            let bucketWidth = store.isSearchExpanded
+                ? estimatedCollapsedBucketChipWidth
+                : estimatedExpandedBucketChipWidth(title: bucket.name)
+            estimated += 8 + bucketWidth
         }
 
-        return min(max(estimated, 150), 520)
+        let fixedControlsWidth = (store.isSearchExpanded ? searchPillWidth : searchToggleDiameter) + 8 + 4 + 22
+        let maxAvailableForStrip = max(120, maxControlsWidth - fixedControlsWidth)
+        return min(estimated, maxAvailableForStrip)
     }
 
     private var estimatedClipboardChipWidth: CGFloat {
@@ -195,6 +234,12 @@ struct ClipboardPanelView: View {
     private var estimatedCollapsedBucketChipWidth: CGFloat {
         // dot + tap target buffer
         18
+    }
+
+    private func estimatedExpandedBucketChipWidth(title: String) -> CGFloat {
+        // dot + spacing + title + horizontal padding + visual buffer
+        let clampedChars = min(max(title.count, 4), 24)
+        return 9 + 6 + CGFloat(clampedChars) * 6.0 + 20 + 3
     }
 
     private var shortcutHints: some View {
@@ -305,14 +350,20 @@ struct ClipboardPanelView: View {
                         )
                         .id(item.id)
                         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .onTapGesture {
-                            store.select(index)
-                        }
+                        .onLongPressGesture(
+                            minimumDuration: 0,
+                            maximumDistance: 20,
+                            pressing: { isPressing in
+                                guard isPressing else { return }
+                                store.select(index)
+                            },
+                            perform: {}
+                        )
                         .onTapGesture(count: 2) {
                             onActivateItem(index)
                         }
                         .opacity(activeCardDrag?.clipItemID == item.id ? 0.34 : 1.0)
-                        .highPriorityGesture(cardDragGesture(for: item))
+                        .simultaneousGesture(cardDragGesture(for: item))
                     }
                 }
                 .padding(.horizontal, 4)
@@ -528,6 +579,7 @@ private struct ClipboardBucketChip: View {
             }
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 }
 
@@ -542,6 +594,7 @@ private struct BucketChip: View {
     let onDelete: () -> Void
     let onRecolor: (String) -> Void
     let onRenameEditingStateChange: ((Bool) -> Void)?
+    let prefersCollapsedStyle: Bool
 
     @State private var isRenaming = false
     @State private var renameDraft = ""
@@ -603,7 +656,7 @@ private struct BucketChip: View {
             }
         }
         .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
-        .frame(minWidth: shouldShowExpandedVisual ? nil : 18)
+        .frame(minWidth: 18, alignment: shouldShowExpandedVisual ? .leading : .center)
         .frame(height: chipHeight)
         .background {
             Capsule()
@@ -619,7 +672,7 @@ private struct BucketChip: View {
                 .opacity(shouldShowExpandedVisual ? 1 : 0)
         }
         .overlay {
-            if isSelected && !shouldShowExpandedVisual {
+            if isSelected && prefersCollapsedStyle && !shouldShowExpandedVisual {
                 Circle()
                     .stroke(.white.opacity(0.56), lineWidth: 1.0)
                     .frame(width: 15, height: 15)
@@ -636,14 +689,21 @@ private struct BucketChip: View {
         }
         .scaleEffect(isDropTargeted ? 1.04 : (didJustReceiveDrop ? 1.07 : 1.0))
         .shadow(color: glowColor, radius: isDropTargeted ? 12 : (didJustReceiveDrop ? 10 : 0), y: 0)
+        .zIndex(shouldShowExpandedVisual ? 2 : 0)
         .animation(.spring(response: 0.24, dampingFraction: 0.82), value: shouldShowExpandedVisual)
         .animation(.spring(response: 0.25, dampingFraction: 0.78), value: isDropTargeted)
         .animation(.spring(response: 0.26, dampingFraction: 0.62), value: didJustReceiveDrop)
         .frame(height: hitTargetHeight)
         .contentShape(Rectangle())
+        .pointingHandCursor(enabled: !isRenaming)
         .onHover { hovering in
             guard !isRenaming else { return }
-            isHovered = hovering
+            isHovered = prefersCollapsedStyle ? hovering : false
+        }
+        .onChange(of: prefersCollapsedStyle) { _, isCollapsedStyle in
+            if !isCollapsedStyle {
+                isHovered = false
+            }
         }
         .onChange(of: title) { _, _ in
             if !isRenaming {
@@ -756,7 +816,47 @@ private struct BucketChip: View {
     }
 
     private var shouldShowExpandedVisual: Bool {
-        isRenaming || isHovered || isDropTargeted || didJustReceiveDrop
+        if !prefersCollapsedStyle {
+            return true
+        }
+        return isRenaming || isHovered || isDropTargeted || didJustReceiveDrop
+    }
+}
+
+private struct PointingHandCursorModifier: ViewModifier {
+    let enabled: Bool
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                if enabled && hovering {
+                    guard !isHovering else { return }
+                    NSCursor.pointingHand.push()
+                    isHovering = true
+                    return
+                }
+
+                guard isHovering else { return }
+                NSCursor.pop()
+                isHovering = false
+            }
+            .onChange(of: enabled) { _, isEnabled in
+                guard !isEnabled, isHovering else { return }
+                NSCursor.pop()
+                isHovering = false
+            }
+            .onDisappear {
+                guard isHovering else { return }
+                NSCursor.pop()
+                isHovering = false
+            }
+    }
+}
+
+private extension View {
+    func pointingHandCursor(enabled: Bool = true) -> some View {
+        modifier(PointingHandCursorModifier(enabled: enabled))
     }
 }
 
@@ -771,6 +871,14 @@ private struct BucketChipFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Int64: CGRect], nextValue: () -> [Int64: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+private struct ShortcutHintsWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
