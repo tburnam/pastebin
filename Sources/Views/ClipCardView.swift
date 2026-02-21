@@ -19,6 +19,7 @@ struct ClipCardView: View {
 
     private let cardBase = Color(white: 0.11)
     private let selectionColor = Color(red: 0.35, green: 0.55, blue: 1.0)
+    private let headerHeight: CGFloat = 64
 
     // Fast accent lookup: known apps get fixed colors, everything else is off-black.
     private static let offBlackAccent = Color(red: 0.10, green: 0.10, blue: 0.11)
@@ -76,7 +77,7 @@ struct ClipCardView: View {
                 linkContent
             }
         }
-        .frame(width: 244, height: 252)
+        .frame(width: 244, height: 252, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(cardBase)
@@ -106,7 +107,7 @@ struct ClipCardView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 titleView
                     .padding(.top, 1)
@@ -115,18 +116,26 @@ struct ClipCardView: View {
                     .font(.system(size: 9, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.46))
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .layoutPriority(1)
             .padding(.top, 4)
 
             Spacer(minLength: 0)
 
             appIcon
+                .padding(.top, 2)
         }
         .padding(.leading, 14)
         .padding(.trailing, 8)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: headerHeight, maxHeight: headerHeight, alignment: .topLeading)
         .background(effectiveAccentColor)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(.black.opacity(0.22))
+                .frame(height: 0.7)
+        }
         .contentShape(Rectangle())
         .highPriorityGesture(
             TapGesture(count: 2).onEnded {
@@ -162,6 +171,7 @@ struct ClipCardView: View {
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.88))
                 .lineLimit(1)
+                .truncationMode(.tail)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     guard isTitleEditable else { return }
@@ -205,6 +215,8 @@ struct ClipCardView: View {
                 .font(.system(size: 9.8, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.46))
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 2)
 
             Spacer(minLength: 0)

@@ -180,8 +180,8 @@ struct ClipboardPanelView: View {
     private var bucketStripWidth: CGFloat {
         var estimated: CGFloat = estimatedClipboardChipWidth
 
-        for bucket in store.buckets {
-            estimated += 8 + estimatedBucketChipWidth(title: bucket.name)
+        for _ in store.buckets {
+            estimated += 8 + estimatedCollapsedBucketChipWidth
         }
 
         return min(max(estimated, 150), 520)
@@ -192,10 +192,9 @@ struct ClipboardPanelView: View {
         10 + 6 + 9 * 6.2 + 20 + 3
     }
 
-    private func estimatedBucketChipWidth(title: String) -> CGFloat {
-        // dot + spacing + title + horizontal padding + visual buffer
-        let clampedChars = min(max(title.count, 4), 24)
-        return 9 + 6 + CGFloat(clampedChars) * 6.0 + 20 + 3
+    private var estimatedCollapsedBucketChipWidth: CGFloat {
+        // dot + tap target buffer
+        18
     }
 
     private var shortcutHints: some View {
@@ -546,6 +545,7 @@ private struct BucketChip: View {
 
     @State private var isRenaming = false
     @State private var renameDraft = ""
+    @State private var isHovered = false
     @FocusState private var isRenameFocused: Bool
     private let chipHeight: CGFloat = 29
     private let hitTargetHeight: CGFloat = 32
@@ -579,15 +579,18 @@ private struct BucketChip: View {
                 }
             } else {
                 Button(action: onTap) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: shouldShowExpandedVisual ? 6 : 0) {
                         Circle()
                             .fill(color)
                             .frame(width: 9, height: 9)
 
-                        Text(title)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
-                            .lineLimit(1)
+                        if shouldShowExpandedVisual {
+                            Text(title)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.82))
+                                .lineLimit(1)
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                        }
                     }
                     .contentShape(Rectangle())
                 }
@@ -599,11 +602,13 @@ private struct BucketChip: View {
                 )
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
+        .frame(minWidth: shouldShowExpandedVisual ? nil : 18)
         .frame(height: chipHeight)
         .background {
             Capsule()
                 .fill(backgroundFill)
+                .opacity(shouldShowExpandedVisual ? 1 : 0)
         }
         .overlay {
             Capsule()
@@ -611,6 +616,14 @@ private struct BucketChip: View {
                     strokeColor,
                     lineWidth: isDropTargeted || didJustReceiveDrop ? 1.6 : 0.8
                 )
+                .opacity(shouldShowExpandedVisual ? 1 : 0)
+        }
+        .overlay {
+            if isSelected && !shouldShowExpandedVisual {
+                Circle()
+                    .stroke(.white.opacity(0.56), lineWidth: 1.0)
+                    .frame(width: 15, height: 15)
+            }
         }
         .overlay(alignment: .topTrailing) {
             if isDropTargeted {
@@ -623,10 +636,15 @@ private struct BucketChip: View {
         }
         .scaleEffect(isDropTargeted ? 1.04 : (didJustReceiveDrop ? 1.07 : 1.0))
         .shadow(color: glowColor, radius: isDropTargeted ? 12 : (didJustReceiveDrop ? 10 : 0), y: 0)
+        .animation(.spring(response: 0.24, dampingFraction: 0.82), value: shouldShowExpandedVisual)
         .animation(.spring(response: 0.25, dampingFraction: 0.78), value: isDropTargeted)
         .animation(.spring(response: 0.26, dampingFraction: 0.62), value: didJustReceiveDrop)
         .frame(height: hitTargetHeight)
         .contentShape(Rectangle())
+        .onHover { hovering in
+            guard !isRenaming else { return }
+            isHovered = hovering
+        }
         .onChange(of: title) { _, _ in
             if !isRenaming {
                 renameDraft = title
@@ -671,6 +689,7 @@ private struct BucketChip: View {
         guard !isRenaming else { return }
         renameDraft = title
         isRenaming = true
+        isHovered = false
         onRenameEditingStateChange?(true)
     }
 
@@ -734,6 +753,10 @@ private struct BucketChip: View {
             return color.opacity(0.42)
         }
         return .clear
+    }
+
+    private var shouldShowExpandedVisual: Bool {
+        isRenaming || isHovered || isDropTargeted || didJustReceiveDrop
     }
 }
 
