@@ -9,6 +9,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     private var panel: FloatingPanel?
     private var keyMonitor: Any?
     private var didPrewarmPanel = false
+    private var appToReactivateOnClose: NSRunningApplication?
 
     private let panelHeight: CGFloat = 360
 
@@ -46,6 +47,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         panel.setFrame(startFrame, display: false)
         panel.alphaValue = 0
 
+        captureFrontmostAppForFocusRestore()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.contentView?.layoutSubtreeIfNeeded()
@@ -73,7 +75,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         didPrewarmPanel = true
     }
 
-    func close() {
+    func close(restorePreviousAppFocus: Bool = true) {
         guard let panel, panel.isVisible else {
             return
         }
@@ -90,14 +92,20 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             context.allowsImplicitAnimation = true
             panel.animator().setFrame(offscreenFrame, display: true)
             panel.animator().alphaValue = 0
-        } completionHandler: {
+        } completionHandler: { [weak self] in
             panel.orderOut(nil)
             panel.alphaValue = 1
+
+            if restorePreviousAppFocus {
+                self?.restorePreviousAppFocusIfNeeded()
+            } else {
+                self?.appToReactivateOnClose = nil
+            }
         }
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        close()
+        close(restorePreviousAppFocus: false)
     }
 
     private func ensurePanel() -> FloatingPanel {
@@ -314,6 +322,35 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         guard let firstResponder = panel.firstResponder else { return false }
 
         return firstResponder is NSTextView || firstResponder is NSTextField
+    }
+
+    private func captureFrontmostAppForFocusRestore() {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
+            appToReactivateOnClose = nil
+            return
+        }
+
+        let currentProcessID = ProcessInfo.processInfo.processIdentifier
+        guard frontmostApp.processIdentifier != currentProcessID else {
+            appToReactivateOnClose = nil
+            return
+        }
+
+        appToReactivateOnClose = frontmostApp
+    }
+
+    private func restorePreviousAppFocusIfNeeded() {
+        defer { appToReactivateOnClose = nil }
+
+        guard let appToReactivateOnClose else { return }
+
+        let currentProcessID = ProcessInfo.processInfo.processIdentifier
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == currentProcessID else {
+            return
+        }
+
+        guard !appToReactivateOnClose.isTerminated else { return }
+        _ = appToReactivateOnClose.activate(options: [])
     }
 }
 
