@@ -137,7 +137,7 @@ struct ClipCardView: View {
                     .padding(.top, 5)
 
                 Text(relativeCopiedTime)
-                    .font(.system(size: 9, weight: .regular, design: .rounded))
+                    .font(.system(size: 10, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.46))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -174,7 +174,7 @@ struct ClipCardView: View {
         if isEditingTitle {
             TextField("", text: $titleDraft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.88))
                 .focused($isTitleFocused)
                 .onSubmit {
@@ -192,7 +192,7 @@ struct ClipCardView: View {
                 }
         } else {
             Text(item.displayTitle)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.88))
                 .lineLimit(1)
                 .truncationMode(.tail)

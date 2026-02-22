@@ -160,14 +160,21 @@ final class PasteboardMonitor {
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        if let linkURL {
-            let linkContent = plainString?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedContent = (linkContent?.isEmpty == false) ? linkContent! : linkURL.absoluteString
+        let resolvedLinkURL = linkURL ?? standaloneWebURL(from: trimmed)
+        if let resolvedLinkURL {
+            let resolvedContent: String
+            if linkURL != nil {
+                let linkContent = plainString?.trimmingCharacters(in: .whitespacesAndNewlines)
+                resolvedContent = (linkContent?.isEmpty == false) ? linkContent! : resolvedLinkURL.absoluteString
+            } else {
+                resolvedContent = resolvedLinkURL.absoluteString
+            }
+
             return CapturedClipboardItem(
                 content: resolvedContent,
                 contentTypeRaw: "link",
-                linkURL: linkURL.absoluteString,
-                dedupeKey: dedupeKey(prefix: "link", from: Data(linkURL.absoluteString.utf8))
+                linkURL: resolvedLinkURL.absoluteString,
+                dedupeKey: dedupeKey(prefix: "link", from: Data(resolvedLinkURL.absoluteString.utf8))
             )
         }
 
@@ -233,6 +240,38 @@ final class PasteboardMonitor {
         }
 
         return urls.first(where: { !$0.isFileURL })
+    }
+
+    private func standaloneWebURL(from value: String) -> URL? {
+        for candidate in urlCandidates(from: value) {
+            if let url = ClipItem.resolveLinkURL(linkURLString: candidate) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private func urlCandidates(from value: String) -> [String] {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let wrappers: [(Character, Character)] = [
+            ("\"", "\""),
+            ("'", "'"),
+            ("<", ">"),
+            ("(", ")"),
+            ("[", "]"),
+            ("{", "}")
+        ]
+
+        guard let first = trimmed.first, let last = trimmed.last else { return [trimmed] }
+        guard wrappers.contains(where: { $0.0 == first && $0.1 == last }) else { return [trimmed] }
+
+        let inner = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !inner.isEmpty else { return [trimmed] }
+
+        return [trimmed, inner]
     }
 
     private func pasteboardTypeIdentifiers(from pasteboard: NSPasteboard) -> [String] {

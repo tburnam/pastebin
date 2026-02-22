@@ -297,7 +297,7 @@ struct ClipItem: Identifiable, Equatable {
         }
     }
 
-    private static func resolveLinkURL(linkURLString: String?) -> URL? {
+    static func resolveLinkURL(linkURLString: String?) -> URL? {
         guard let linkURLString, !linkURLString.isEmpty else { return nil }
         guard let url = URL(string: linkURLString), isWebURL(url) else { return nil }
         return url
