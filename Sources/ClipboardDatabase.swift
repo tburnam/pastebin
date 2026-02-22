@@ -221,6 +221,32 @@ final class ClipboardDatabase {
         }
     }
 
+    @discardableResult
+    func pruneHistory(olderThan cutoffDate: Date?) throws -> Int {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            guard let cutoffDate else { return 0 }
+
+            let sql = "DELETE FROM clip_items WHERE copied_at < ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_double(statement, 1, cutoffDate.timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+
+            return Int(sqlite3_changes(db))
+        }
+    }
+
     func fetchRecent(limit: Int = 1200) throws -> [ClipItem] {
         try queue.sync {
             guard let db else {

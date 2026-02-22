@@ -5,6 +5,11 @@ struct PasteBinApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { EmptyView() }
+        Settings {
+            PasteBinSettingsView(
+                hotKeyManager: HotKeyManager.shared,
+                appSettings: AppSettings.shared
+            )
+        }
     }
 }

@@ -186,6 +186,16 @@ final class ClipboardStore: ObservableObject {
                 selectedIndex = 0
             }
 
+            do {
+                let prunedCount = try pruneHistoryForCurrentRetention(referenceDate: inserted.copiedAt)
+                if prunedCount > 0 {
+                    reloadFromDatabaseAsync()
+                    return
+                }
+            } catch {
+                print("Failed applying retention policy after insert: \(error)")
+            }
+
             scheduleFiltering(debounce: 0)
         } catch {
             print("Failed inserting clipboard item: \(error)")
@@ -629,6 +639,11 @@ final class ClipboardStore: ObservableObject {
 
     private func fallbackIcon() -> NSImage? {
         fallbackIconImage
+    }
+
+    private func pruneHistoryForCurrentRetention(referenceDate: Date) throws -> Int {
+        let cutoffDate = AppSettings.shared.retentionPeriod.cutoffDate(referenceDate: referenceDate)
+        return try database.pruneHistory(olderThan: cutoffDate)
     }
 
     private func cacheResolvedIcon(_ icon: NSImage, for bundleID: String) {

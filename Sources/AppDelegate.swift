@@ -1,4 +1,6 @@
 import AppKit
+import Combine
+import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var database: ClipboardDatabase?
@@ -6,8 +8,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: PasteboardMonitor?
     private var panelController: ClipboardPanelController?
     private var statusItem: NSStatusItem?
-    private var settingsPanelController: HotKeySettingsPanelController?
     private let hotKeyManager = HotKeyManager.shared
+    private let appSettings = AppSettings.shared
+    private var cancellables: Set<AnyCancellable> = []
+    private lazy var settingsWindowController = makeSettingsWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -29,8 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.panelController = panelController
             self.monitor = monitor
 
-            settingsPanelController = HotKeySettingsPanelController(hotKeyManager: hotKeyManager)
-
             setupStatusItem()
             panelController.prewarm()
 
@@ -38,8 +40,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.openClipboardPanel(nil)
             }
 
-            // Defer initial DB load off the launch critical path.
-            store.reloadFromDatabaseAsync(resetQuery: true)
+            observeRetentionChanges()
+            applyRetentionPolicy(resetQuery: true)
             monitor.start()
         } catch {
             assertionFailure("Failed to start PasteBin: \(error)")
@@ -60,7 +62,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSettings(_ sender: Any?) {
-        settingsPanelController?.open()
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindowController.showWindow(sender)
+        settingsWindowController.window?.makeKeyAndOrderFront(sender)
+    }
+
+    private func makeSettingsWindowController() -> NSWindowController {
+        let contentView = PasteBinSettingsView(
+            hotKeyManager: hotKeyManager,
+            appSettings: appSettings
+        )
+
+        let hostingController = NSHostingController(rootView: contentView)
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "PasteBin Settings"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.setContentSize(NSSize(width: 480, height: 360))
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        return NSWindowController(window: window)
     }
 
     private func copyToPasteboard(_ item: ClipItem) {
@@ -153,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
-        let settingsItem = NSMenuItem(title: "Hotkey Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",")
         settingsItem.target = self
         settingsItem.keyEquivalentModifierMask = [.command]
         menu.addItem(settingsItem)
@@ -166,5 +187,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
         self.statusItem = statusItem
+    }
+
+    private func observeRetentionChanges() {
+        appSettings.$retentionPeriod
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.applyRetentionPolicy(resetQuery: false)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func applyRetentionPolicy(resetQuery: Bool) {
+        guard let database, let store else { return }
+        let retentionPeriod = appSettings.retentionPeriod
+
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                _ = try database.pruneHistory(
+                    olderThan: retentionPeriod.cutoffDate(referenceDate: Date())
+                )
+            } catch {
+                print("Failed applying retention policy: \(error)")
+            }
+
+            DispatchQueue.main.async {
+                store.reloadFromDatabaseAsync(resetQuery: resetQuery)
+            }
+        }
     }
 }
