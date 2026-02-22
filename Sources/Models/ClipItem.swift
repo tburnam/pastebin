@@ -59,6 +59,8 @@ enum ClipContentType: Equatable {
 }
 
 struct ClipItem: Identifiable, Equatable {
+    private static let previewCharacterLimit = 420
+
     let id: Int64
     let content: String
     let copiedAt: Date
@@ -349,7 +351,9 @@ struct ClipItem: Identifiable, Equatable {
     }
 
     private static func truncatedPreview(_ value: String) -> String {
-        value.count > 220 ? String(value.prefix(217)) + "..." : value
+        value.count > previewCharacterLimit
+            ? String(value.prefix(previewCharacterLimit - 3)) + "..."
+            : value
     }
 
     private static func compactPreview(_ value: String) -> String {

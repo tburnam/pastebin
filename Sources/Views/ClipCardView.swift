@@ -21,6 +21,8 @@ struct ClipCardView: View {
     private let cardBase = Color(white: 0.11)
     private let selectionColor = Color(red: 0.35, green: 0.55, blue: 1.0)
     private let headerHeight: CGFloat = 64
+    private let textPreviewLineLimit = 8
+    private let snippetPreviewLineLimit = 8
 
     // Fast accent lookup: known apps get fixed colors, everything else is off-black.
     private static let offBlackAccent = Color(red: 0.10, green: 0.10, blue: 0.11)
@@ -207,7 +209,7 @@ struct ClipCardView: View {
             Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
                 .font(.system(size: 13.5, weight: .regular, design: .rounded))
                 .foregroundStyle(.white.opacity(0.74))
-                .lineLimit(5)
+                .lineLimit(textPreviewLineLimit)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 12)
@@ -222,7 +224,7 @@ struct ClipCardView: View {
 
     private var codeContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            snippetPanel(text: codeSnippetText, monospaced: true, lineLimit: 6)
+            snippetPanel(text: codeSnippetText, monospaced: true, lineLimit: snippetPreviewLineLimit)
                 .padding(.top, 12)
 
             Spacer(minLength: 0)
@@ -236,7 +238,7 @@ struct ClipCardView: View {
 
     private var structuredContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            snippetPanel(text: structuredSnippetText, monospaced: true, lineLimit: 6)
+            snippetPanel(text: structuredSnippetText, monospaced: true, lineLimit: snippetPreviewLineLimit)
                 .padding(.top, 12)
 
             Spacer(minLength: 0)
