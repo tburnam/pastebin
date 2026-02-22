@@ -2,6 +2,12 @@ import AppKit
 import SwiftUI
 
 struct ClipboardPanelView: View {
+    private enum ShortcutKey: Hashable {
+        case symbol(String)
+        case text(String)
+        case returnKey
+    }
+
     @ObservedObject var store: ClipboardStore
     let onActivateItem: (Int) -> Void
 
@@ -67,10 +73,11 @@ struct ClipboardPanelView: View {
             let reservedTrailingSpace = max(shortcutHintsWidth, 170) + 14
             let maxControlsWidth = max(220, proxy.size.width - reservedTrailingSpace)
 
-            ZStack(alignment: .trailing) {
+            ZStack(alignment: .topTrailing) {
                 centeredTopControls(maxControlsWidth: maxControlsWidth)
 
                 shortcutHints
+                    .padding(.top, 2)
                     .padding(.trailing, 2)
                     .background {
                         GeometryReader { hintProxy in
@@ -275,22 +282,67 @@ struct ClipboardPanelView: View {
 
     private var shortcutHints: some View {
         HStack(spacing: 14) {
-            hintLabel("\u{2190} \u{2192}", "navigate")
-            hintLabel("\u{21a9}", "copy")
-            hintLabel("\u{2318}1-9", "jump")
+            shortcutHint(keys: [.symbol("arrow.left"), .symbol("arrow.right")], label: "navigate")
+            shortcutHint(keys: [.returnKey], label: "copy")
+            shortcutHint(keys: [.text("esc")], label: escapeHintLabel)
         }
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    private func hintLabel(_ symbol: String, _ label: String) -> some View {
-        HStack(alignment: .center, spacing: 3) {
-            Text(symbol)
-                .font(.system(size: 9, weight: .medium))
-                .baselineOffset(-1)
+    private var escapeHintLabel: String {
+        shouldEscapeClosePanel ? "close" : "back"
+    }
+
+    private var shouldEscapeClosePanel: Bool {
+        store.isShowingClipboard && !store.isSearchExpanded && store.query.isEmpty
+    }
+
+    private func shortcutHint(keys: [ShortcutKey], label: String) -> some View {
+        HStack(alignment: .center, spacing: 5) {
+            HStack(spacing: 4) {
+                ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
+                    keyCap(for: key)
+                }
+            }
+
             Text(label)
                 .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.44))
         }
-        .foregroundStyle(.white.opacity(0.44))
+    }
+
+    private func keyCap(for key: ShortcutKey) -> some View {
+        keyCapGlyph(for: key)
+            .font(.system(size: 7.5, weight: .semibold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.76))
+            .frame(minWidth: 13, minHeight: 11)
+            .padding(.horizontal, 2.5)
+            .padding(.vertical, 1)
+            .background {
+                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                    .fill(.white.opacity(0.10))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                    .stroke(.white.opacity(0.24), lineWidth: 0.7)
+            }
+    }
+
+    @ViewBuilder
+    private func keyCapGlyph(for key: ShortcutKey) -> some View {
+        switch key {
+        case .symbol(let systemName):
+            Image(systemName: systemName)
+        case .text(let text):
+            Text(text)
+        case .returnKey:
+            if NSImage(systemSymbolName: "return", accessibilityDescription: nil) != nil {
+                Image(systemName: "return")
+            } else {
+                Text("\u{21b5}")
+                    .baselineOffset(-0.2)
+            }
+        }
     }
 
     private var searchPill: some View {

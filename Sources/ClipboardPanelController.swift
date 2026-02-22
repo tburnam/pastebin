@@ -211,16 +211,21 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             store.deleteSelectedItem()
             return true
         case 53: // Escape
-            if store.query.isEmpty {
-                store.collapseSearchIfPossible()
-                if store.isShowingClipboard {
-                    close()
-                } else {
-                    store.showClipboardScope()
-                }
-            } else {
+            if !store.query.isEmpty {
                 store.query = ""
                 store.collapseSearchIfPossible()
+                return true
+            }
+
+            if store.isSearchExpanded {
+                store.collapseSearchIfPossible()
+                return true
+            }
+
+            if store.isShowingClipboard {
+                close()
+            } else {
+                store.showClipboardScope()
             }
             return true
         default:
