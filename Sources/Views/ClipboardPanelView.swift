@@ -13,6 +13,7 @@ struct ClipboardPanelView: View {
 
     @FocusState private var isSearchFocused: Bool
     @StateObject private var linkPreviewStore = LinkPreviewStore()
+    @StateObject private var filePreviewStore = FilePreviewStore()
     @State private var droppedBucketColorByClipID: [Int64: String] = [:]
     @State private var activeCardDrag: ActiveCardDrag?
     @State private var hoveredBucketID: Int64?
@@ -359,6 +360,9 @@ struct ClipboardPanelView: View {
             .foregroundStyle(.white.opacity(0.88))
             .textFieldStyle(.plain)
             .focused($isSearchFocused)
+            .onAppear {
+                focusSearchFieldAndMoveCursorToEnd()
+            }
         }
         .padding(.horizontal, 12)
         .frame(height: chipVisualHeight)
@@ -429,7 +433,8 @@ struct ClipboardPanelView: View {
                             onTitleEditingStateChange: { isEditing in
                                 store.setInlineTitleEditorActive(isEditing)
                             },
-                            linkPreviewStore: linkPreviewStore
+                            linkPreviewStore: linkPreviewStore,
+                            filePreviewStore: filePreviewStore
                         )
                         .id(item.id)
                         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

@@ -68,16 +68,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(item.content, forType: .string)
+        write(item: item, to: pasteboard)
 
         // Promote the selected history item to most-recent without creating duplicates.
-        store?.insert(
-            captured: CapturedClipboardItem(
-                content: item.content,
-                sourceBundleID: item.sourceBundleID,
-                sourceAppName: item.sourceAppName
-            )
-        )
+        store?.insert(captured: CapturedClipboardItem(item: item))
+    }
+
+    private func write(item: ClipItem, to pasteboard: NSPasteboard) {
+        switch item.contentType {
+        case .image:
+            if let payloadData = item.payloadData,
+               let image = NSImage(data: payloadData),
+               pasteboard.writeObjects([image]) {
+                return
+            }
+
+        case .fileList:
+            let urls = item.filePaths.map { URL(fileURLWithPath: $0) }
+            if !urls.isEmpty {
+                let nsURLs = urls.map { $0 as NSURL }
+                if pasteboard.writeObjects(nsURLs) {
+                    return
+                }
+            }
+
+        case .richText:
+            var wroteAny = false
+
+            if let rtfData = item.rtfData {
+                wroteAny = pasteboard.setData(rtfData, forType: .rtf) || wroteAny
+            }
+
+            if let htmlContent = item.htmlContent {
+                wroteAny = pasteboard.setString(htmlContent, forType: .html) || wroteAny
+            }
+
+            if !item.content.isEmpty {
+                wroteAny = pasteboard.setString(item.content, forType: .string) || wroteAny
+            }
+
+            if wroteAny {
+                return
+            }
+
+        case .link:
+            if let linkURL = item.linkURL {
+                _ = pasteboard.writeObjects([linkURL as NSURL])
+                if !item.content.isEmpty {
+                    _ = pasteboard.setString(item.content, forType: .string)
+                }
+                return
+            }
+
+        case .code, .structured, .text:
+            break
+        }
+
+        _ = pasteboard.setString(item.content, forType: .string)
     }
 
     private func setupStatusItem() {

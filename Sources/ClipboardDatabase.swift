@@ -38,7 +38,7 @@ final class ClipboardDatabase {
 
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    private static let latestUserVersion: Int32 = 2
+    private static let latestUserVersion: Int32 = 3
 
     init(url: URL) throws {
         databasePath = url.path
@@ -95,18 +95,23 @@ final class ClipboardDatabase {
         }
     }
 
-    func insert(content: String, sourceBundleID: String?, sourceAppName: String?) throws -> ClipItem {
+    func insert(captured: CapturedClipboardItem) throws -> ClipItem {
         try queue.sync {
             guard let db else {
                 throw DatabaseError.openFailed("SQLite handle is not available")
             }
 
             let now = Date()
+            let contentTypeRaw = captured.contentTypeRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedContentType = contentTypeRaw.isEmpty ? "text" : contentTypeRaw
+            let filePathsJSON = ClipItem.encodeFilePaths(captured.filePaths)
 
-            if let existingID = try existingClipID(forContent: content, db: db) {
+            if let existingID = try existingClipID(forDedupeKey: captured.dedupeKey, db: db) {
                 let updateSQL = """
                 UPDATE clip_items
-                SET copied_at = ?, source_bundle_id = ?, source_app_name = ?
+                SET content = ?, copied_at = ?, source_bundle_id = ?, source_app_name = ?, content_type = ?, link_url = ?,
+                    code_language = ?, structured_format = ?, file_paths_json = ?, image_width = ?, image_height = ?,
+                    payload_data = ?, rtf_data = ?, html_content = ?, dedupe_key = ?
                 WHERE id = ?;
                 """
 
@@ -116,10 +121,22 @@ final class ClipboardDatabase {
                 }
                 defer { sqlite3_finalize(updateStatement) }
 
-                sqlite3_bind_double(updateStatement, 1, now.timeIntervalSince1970)
-                bind(sourceBundleID, at: 2, to: updateStatement)
-                bind(sourceAppName, at: 3, to: updateStatement)
-                sqlite3_bind_int64(updateStatement, 4, existingID)
+                bind(captured.content, at: 1, to: updateStatement)
+                sqlite3_bind_double(updateStatement, 2, now.timeIntervalSince1970)
+                bind(captured.sourceBundleID, at: 3, to: updateStatement)
+                bind(captured.sourceAppName, at: 4, to: updateStatement)
+                bind(normalizedContentType, at: 5, to: updateStatement)
+                bind(captured.linkURL, at: 6, to: updateStatement)
+                bind(captured.codeLanguage, at: 7, to: updateStatement)
+                bind(captured.structuredFormatRaw, at: 8, to: updateStatement)
+                bind(filePathsJSON, at: 9, to: updateStatement)
+                bind(captured.imageWidth, at: 10, to: updateStatement)
+                bind(captured.imageHeight, at: 11, to: updateStatement)
+                bind(captured.payloadData, at: 12, to: updateStatement)
+                bind(captured.rtfData, at: 13, to: updateStatement)
+                bind(captured.htmlContent, at: 14, to: updateStatement)
+                bind(captured.dedupeKey, at: 15, to: updateStatement)
+                sqlite3_bind_int64(updateStatement, 16, existingID)
 
                 guard sqlite3_step(updateStatement) == SQLITE_DONE else {
                     throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -127,14 +144,30 @@ final class ClipboardDatabase {
 
                 return ClipItem(
                     id: existingID,
-                    content: content,
+                    content: captured.content,
                     copiedAt: now,
-                    sourceBundleID: sourceBundleID,
-                    sourceAppName: sourceAppName
+                    sourceBundleID: captured.sourceBundleID,
+                    sourceAppName: captured.sourceAppName,
+                    contentTypeRaw: normalizedContentType,
+                    linkURLString: captured.linkURL,
+                    codeLanguage: captured.codeLanguage,
+                    structuredFormatRaw: captured.structuredFormatRaw,
+                    filePathsJSON: filePathsJSON,
+                    imageWidth: captured.imageWidth,
+                    imageHeight: captured.imageHeight,
+                    payloadData: captured.payloadData,
+                    rtfData: captured.rtfData,
+                    htmlContent: captured.htmlContent,
+                    dedupeKey: captured.dedupeKey
                 )
             }
 
-            let insertSQL = "INSERT INTO clip_items(content, copied_at, source_bundle_id, source_app_name) VALUES (?, ?, ?, ?);"
+            let insertSQL = """
+            INSERT INTO clip_items(
+                content, copied_at, source_bundle_id, source_app_name, content_type, link_url, code_language,
+                structured_format, file_paths_json, image_width, image_height, payload_data, rtf_data, html_content, dedupe_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
             var insertStatement: OpaquePointer?
 
             guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
@@ -143,10 +176,21 @@ final class ClipboardDatabase {
 
             defer { sqlite3_finalize(insertStatement) }
 
-            bind(content, at: 1, to: insertStatement)
+            bind(captured.content, at: 1, to: insertStatement)
             sqlite3_bind_double(insertStatement, 2, now.timeIntervalSince1970)
-            bind(sourceBundleID, at: 3, to: insertStatement)
-            bind(sourceAppName, at: 4, to: insertStatement)
+            bind(captured.sourceBundleID, at: 3, to: insertStatement)
+            bind(captured.sourceAppName, at: 4, to: insertStatement)
+            bind(normalizedContentType, at: 5, to: insertStatement)
+            bind(captured.linkURL, at: 6, to: insertStatement)
+            bind(captured.codeLanguage, at: 7, to: insertStatement)
+            bind(captured.structuredFormatRaw, at: 8, to: insertStatement)
+            bind(filePathsJSON, at: 9, to: insertStatement)
+            bind(captured.imageWidth, at: 10, to: insertStatement)
+            bind(captured.imageHeight, at: 11, to: insertStatement)
+            bind(captured.payloadData, at: 12, to: insertStatement)
+            bind(captured.rtfData, at: 13, to: insertStatement)
+            bind(captured.htmlContent, at: 14, to: insertStatement)
+            bind(captured.dedupeKey, at: 15, to: insertStatement)
 
             guard sqlite3_step(insertStatement) == SQLITE_DONE else {
                 throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
@@ -155,10 +199,21 @@ final class ClipboardDatabase {
             let id = sqlite3_last_insert_rowid(db)
             return ClipItem(
                 id: id,
-                content: content,
+                content: captured.content,
                 copiedAt: now,
-                sourceBundleID: sourceBundleID,
-                sourceAppName: sourceAppName
+                sourceBundleID: captured.sourceBundleID,
+                sourceAppName: captured.sourceAppName,
+                contentTypeRaw: normalizedContentType,
+                linkURLString: captured.linkURL,
+                codeLanguage: captured.codeLanguage,
+                structuredFormatRaw: captured.structuredFormatRaw,
+                filePathsJSON: filePathsJSON,
+                imageWidth: captured.imageWidth,
+                imageHeight: captured.imageHeight,
+                payloadData: captured.payloadData,
+                rtfData: captured.rtfData,
+                htmlContent: captured.htmlContent,
+                dedupeKey: captured.dedupeKey
             )
         }
     }
@@ -170,7 +225,9 @@ final class ClipboardDatabase {
             }
 
             let sql = """
-            SELECT id, content, copied_at, source_bundle_id, source_app_name
+            SELECT id, content, copied_at, source_bundle_id, source_app_name, content_type, link_url, code_language,
+                   structured_format, file_paths_json, image_width, image_height, payload_data, rtf_data, html_content,
+                   dedupe_key
             FROM clip_items
             ORDER BY copied_at DESC
             LIMIT ?;
@@ -194,6 +251,17 @@ final class ClipboardDatabase {
                 let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
                 let bundleID = columnText(statement, index: 3)
                 let appName = columnText(statement, index: 4)
+                let contentTypeRaw = columnText(statement, index: 5)
+                let linkURL = columnText(statement, index: 6)
+                let codeLanguage = columnText(statement, index: 7)
+                let structuredFormatRaw = columnText(statement, index: 8)
+                let filePathsJSON = columnText(statement, index: 9)
+                let imageWidth = columnInt(statement, index: 10)
+                let imageHeight = columnInt(statement, index: 11)
+                let payloadData = columnData(statement, index: 12)
+                let rtfData = columnData(statement, index: 13)
+                let htmlContent = columnText(statement, index: 14)
+                let dedupeKey = columnText(statement, index: 15)
 
                 items.append(
                     ClipItem(
@@ -201,7 +269,18 @@ final class ClipboardDatabase {
                         content: content,
                         copiedAt: copiedAt,
                         sourceBundleID: bundleID,
-                        sourceAppName: appName
+                        sourceAppName: appName,
+                        contentTypeRaw: contentTypeRaw,
+                        linkURLString: linkURL,
+                        codeLanguage: codeLanguage,
+                        structuredFormatRaw: structuredFormatRaw,
+                        filePathsJSON: filePathsJSON,
+                        imageWidth: imageWidth,
+                        imageHeight: imageHeight,
+                        payloadData: payloadData,
+                        rtfData: rtfData,
+                        htmlContent: htmlContent,
+                        dedupeKey: dedupeKey
                     )
                 )
             }
@@ -572,9 +651,63 @@ final class ClipboardDatabase {
             try execute("PRAGMA user_version = 2;")
         }
 
+        if version < 3 {
+            try addColumnIfNeeded(table: "clip_items", column: "content_type", definition: "TEXT NOT NULL DEFAULT 'text'")
+            try addColumnIfNeeded(table: "clip_items", column: "link_url", definition: "TEXT")
+            try addColumnIfNeeded(table: "clip_items", column: "code_language", definition: "TEXT")
+            try addColumnIfNeeded(table: "clip_items", column: "structured_format", definition: "TEXT")
+            try addColumnIfNeeded(table: "clip_items", column: "file_paths_json", definition: "TEXT")
+            try addColumnIfNeeded(table: "clip_items", column: "image_width", definition: "INTEGER")
+            try addColumnIfNeeded(table: "clip_items", column: "image_height", definition: "INTEGER")
+            try addColumnIfNeeded(table: "clip_items", column: "payload_data", definition: "BLOB")
+            try addColumnIfNeeded(table: "clip_items", column: "rtf_data", definition: "BLOB")
+            try addColumnIfNeeded(table: "clip_items", column: "html_content", definition: "TEXT")
+            try addColumnIfNeeded(table: "clip_items", column: "dedupe_key", definition: "TEXT")
+
+            try execute("UPDATE clip_items SET content_type = COALESCE(NULLIF(content_type, ''), 'text');")
+            try execute("""
+            UPDATE clip_items
+            SET dedupe_key = CASE
+                WHEN dedupe_key IS NULL OR dedupe_key = '' THEN content
+                ELSE dedupe_key
+            END;
+            """)
+            try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_dedupe_key ON clip_items(dedupe_key);")
+
+            version = 3
+            try execute("PRAGMA user_version = 3;")
+        }
+
         if version < Self.latestUserVersion {
             try execute("PRAGMA user_version = \(Self.latestUserVersion);")
         }
+    }
+
+    private func addColumnIfNeeded(table: String, column: String, definition: String) throws {
+        guard try !columnExists(table: table, column: column) else { return }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition);")
+    }
+
+    private func columnExists(table: String, column: String) throws -> Bool {
+        guard let db else {
+            throw DatabaseError.openFailed("SQLite handle is not available")
+        }
+
+        let sql = "PRAGMA table_info(\(table));"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let columnName = columnText(statement, index: 1) ?? ""
+            if columnName.caseInsensitiveCompare(column) == .orderedSame {
+                return true
+            }
+        }
+
+        return false
     }
 
     private func openInteractiveReadConnection() throws {
@@ -594,7 +727,9 @@ final class ClipboardDatabase {
 
     private func fetchItems(inBucket bucketID: Int64, limit: Int, using db: OpaquePointer) throws -> [ClipItem] {
         let sql = """
-        SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, bi.custom_title
+        SELECT c.id, c.content, c.copied_at, c.source_bundle_id, c.source_app_name, c.content_type, c.link_url,
+               c.code_language, c.structured_format, c.file_paths_json, c.image_width, c.image_height,
+               c.payload_data, c.rtf_data, c.html_content, c.dedupe_key, bi.custom_title
         FROM bucket_items bi
         INNER JOIN clip_items c ON c.id = bi.clip_item_id
         WHERE bi.bucket_id = ?
@@ -620,7 +755,18 @@ final class ClipboardDatabase {
             let copiedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
             let bundleID = columnText(statement, index: 3)
             let appName = columnText(statement, index: 4)
-            let customTitle = columnText(statement, index: 5)
+            let contentTypeRaw = columnText(statement, index: 5)
+            let linkURL = columnText(statement, index: 6)
+            let codeLanguage = columnText(statement, index: 7)
+            let structuredFormatRaw = columnText(statement, index: 8)
+            let filePathsJSON = columnText(statement, index: 9)
+            let imageWidth = columnInt(statement, index: 10)
+            let imageHeight = columnInt(statement, index: 11)
+            let payloadData = columnData(statement, index: 12)
+            let rtfData = columnData(statement, index: 13)
+            let htmlContent = columnText(statement, index: 14)
+            let dedupeKey = columnText(statement, index: 15)
+            let customTitle = columnText(statement, index: 16)
 
             items.append(
                 ClipItem(
@@ -629,7 +775,18 @@ final class ClipboardDatabase {
                     copiedAt: copiedAt,
                     sourceBundleID: bundleID,
                     sourceAppName: appName,
-                    customTitle: customTitle
+                    customTitle: customTitle,
+                    contentTypeRaw: contentTypeRaw,
+                    linkURLString: linkURL,
+                    codeLanguage: codeLanguage,
+                    structuredFormatRaw: structuredFormatRaw,
+                    filePathsJSON: filePathsJSON,
+                    imageWidth: imageWidth,
+                    imageHeight: imageHeight,
+                    payloadData: payloadData,
+                    rtfData: rtfData,
+                    htmlContent: htmlContent,
+                    dedupeKey: dedupeKey
                 )
             )
         }
@@ -637,8 +794,8 @@ final class ClipboardDatabase {
         return items
     }
 
-    private func existingClipID(forContent content: String, db: OpaquePointer) throws -> Int64? {
-        let sql = "SELECT id FROM clip_items WHERE content = ? LIMIT 1;"
+    private func existingClipID(forDedupeKey dedupeKey: String, db: OpaquePointer) throws -> Int64? {
+        let sql = "SELECT id FROM clip_items WHERE dedupe_key = ? LIMIT 1;"
         var statement: OpaquePointer?
 
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -646,7 +803,7 @@ final class ClipboardDatabase {
         }
         defer { sqlite3_finalize(statement) }
 
-        bind(content, at: 1, to: statement)
+        bind(dedupeKey, at: 1, to: statement)
 
         if sqlite3_step(statement) == SQLITE_ROW {
             return sqlite3_column_int64(statement, 0)
@@ -667,11 +824,58 @@ final class ClipboardDatabase {
         }
     }
 
+    private func bind(_ value: Int?, at index: Int32, to statement: OpaquePointer?) {
+        guard let statement else { return }
+
+        if let value {
+            sqlite3_bind_int64(statement, index, Int64(value))
+        } else {
+            sqlite3_bind_null(statement, index)
+        }
+    }
+
+    private func bind(_ data: Data?, at index: Int32, to statement: OpaquePointer?) {
+        guard let statement else { return }
+
+        guard let data else {
+            sqlite3_bind_null(statement, index)
+            return
+        }
+
+        _ = data.withUnsafeBytes { bytes in
+            sqlite3_bind_blob(statement, index, bytes.baseAddress, Int32(data.count), transient)
+        }
+    }
+
     private func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
         guard let raw = sqlite3_column_text(statement, index) else {
             return nil
         }
 
         return String(cString: raw)
+    }
+
+    private func columnInt(_ statement: OpaquePointer?, index: Int32) -> Int? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else {
+            return nil
+        }
+        return Int(sqlite3_column_int64(statement, index))
+    }
+
+    private func columnData(_ statement: OpaquePointer?, index: Int32) -> Data? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else {
+            return nil
+        }
+
+        let byteCount = Int(sqlite3_column_bytes(statement, index))
+        if byteCount == 0 {
+            return Data()
+        }
+
+        guard let bytes = sqlite3_column_blob(statement, index) else {
+            return nil
+        }
+
+        return Data(bytes: bytes, count: byteCount)
     }
 }

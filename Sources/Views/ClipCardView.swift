@@ -12,6 +12,7 @@ struct ClipCardView: View {
     let onTitleChange: ((String?) -> Void)?
     let onTitleEditingStateChange: ((Bool) -> Void)?
     @ObservedObject var linkPreviewStore: LinkPreviewStore
+    @ObservedObject var filePreviewStore: FilePreviewStore
 
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
@@ -66,16 +67,12 @@ struct ClipCardView: View {
         "granola": offWhiteAccent,
         "obsidian": blackAccent
     ]
+    private static let richTextPreviewCache = NSCache<NSString, NSAttributedString>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-
-            if item.linkURL == nil {
-                textContent
-            } else {
-                linkContent
-            }
+            cardContent
         }
         .frame(width: 244, height: 252, alignment: .topLeading)
         .background {
@@ -95,6 +92,11 @@ struct ClipCardView: View {
             guard let linkURL = item.linkURL else { return }
             linkPreviewStore.loadPreview(for: linkURL)
         }
+        .task(id: firstFilePath) {
+            guard case .fileList = item.contentType else { return }
+            guard let firstFilePath else { return }
+            filePreviewStore.loadPreview(for: firstFilePath)
+        }
         .onChange(of: item.customTitle) { _, _ in
             guard !isEditingTitle else { return }
             titleDraft = item.customTitle ?? ""
@@ -106,11 +108,31 @@ struct ClipCardView: View {
         }
     }
 
+    @ViewBuilder
+    private var cardContent: some View {
+        switch item.contentType {
+        case .link:
+            linkContent
+        case .code:
+            codeContent
+        case .image:
+            imageContent
+        case .fileList:
+            fileListContent
+        case .richText:
+            richTextContent
+        case .structured:
+            structuredContent
+        case .text:
+            textContent
+        }
+    }
+
     private var header: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 titleView
-                    .padding(.top, 4)
+                    .padding(.top, 5)
 
                 Text(relativeCopiedTime)
                     .font(.system(size: 9, weight: .regular, design: .rounded))
@@ -198,6 +220,91 @@ struct ClipCardView: View {
         .padding(.bottom, 12)
     }
 
+    private var codeContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            snippetPanel(text: codeSnippetText, monospaced: true, lineLimit: 6)
+                .padding(.top, 12)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: true)
+                .padding(.top, 10)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var structuredContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            snippetPanel(text: structuredSnippetText, monospaced: true, lineLimit: 6)
+                .padding(.top, 12)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: true)
+                .padding(.top, 10)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var richTextContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            richTextPreview
+                .padding(.top, 12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            footer(showCharacterCount: true)
+                .padding(.top, 10)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var imageContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            imagePreviewBox
+                .padding(.top, 12)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: false)
+                .padding(.top, 10)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
+    private var fileListContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            filePreviewBox
+            .padding(.top, 10)
+
+            Text(fileTitle)
+                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.82))
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 8)
+
+            Text(fileSubtitle)
+                .font(.system(size: 9.8, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.46))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
+
+            Spacer(minLength: 0)
+
+            footer(showCharacterCount: false)
+                .padding(.top, 9)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
+    }
+
     private var linkContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             linkPreviewBox
@@ -252,6 +359,154 @@ struct ClipCardView: View {
         }
     }
 
+    private var imagePreviewBox: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.white.opacity(0.06))
+
+            if let imagePreview {
+                Image(nsImage: imagePreview)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 124)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.white.opacity(0.14), lineWidth: 0.7)
+        }
+    }
+
+    private var filePreviewBox: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(white: 0.84, opacity: 0.90))
+
+            if let filePreviewImage {
+                Image(nsImage: filePreviewImage)
+                    .resizable()
+                    .scaledToFill()
+            } else if let filePreviewIcon {
+                Image(nsImage: filePreviewIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 58, height: 58)
+            } else {
+                Image(systemName: "doc")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.black.opacity(0.34))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 108)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(.black.opacity(0.12), lineWidth: 0.7)
+        }
+    }
+
+    private func snippetPanel(text: String, monospaced: Bool, lineLimit: Int) -> some View {
+        Text(text.isEmpty ? "(empty)" : text)
+            .font(.system(size: 11.5, weight: .regular, design: monospaced ? .monospaced : .rounded))
+            .foregroundStyle(.white.opacity(0.74))
+            .lineLimit(lineLimit)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(.white.opacity(0.12), lineWidth: 0.7)
+            )
+    }
+
+    @ViewBuilder
+    private var richTextPreview: some View {
+        if let attributed = richTextAttributedPreview, !attributed.characters.isEmpty {
+            Text(attributed)
+                .font(.system(size: 13.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
+                .font(.system(size: 13.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var richTextAttributedPreview: AttributedString? {
+        let cacheKey = item.dedupeKey as NSString
+        if let cached = Self.richTextPreviewCache.object(forKey: cacheKey) {
+            return AttributedString(cached)
+        }
+
+        guard let parsed = parsedRichTextPreview else {
+            return nil
+        }
+
+        let sanitized = sanitizedRichText(parsed)
+        Self.richTextPreviewCache.setObject(sanitized, forKey: cacheKey)
+        return AttributedString(sanitized)
+    }
+
+    private var parsedRichTextPreview: NSAttributedString? {
+        if let rtfData = item.rtfData,
+           let attributed = try? NSAttributedString(
+               data: rtfData,
+               options: [.documentType: NSAttributedString.DocumentType.rtf],
+               documentAttributes: nil
+           ) {
+            return attributed
+        }
+
+        if let htmlContent = item.htmlContent,
+           let htmlData = htmlContent.data(using: .utf8),
+           let attributed = try? NSAttributedString(
+               data: htmlData,
+               options: [
+                   .documentType: NSAttributedString.DocumentType.html,
+                   .characterEncoding: String.Encoding.utf8.rawValue
+               ],
+               documentAttributes: nil
+           ) {
+            return attributed
+        }
+
+        return nil
+    }
+
+    private func sanitizedRichText(_ attributed: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        var attachmentRanges: [NSRange] = []
+
+        mutable.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
+            if value != nil {
+                attachmentRanges.append(range)
+            }
+        }
+
+        for range in attachmentRanges.reversed() {
+            mutable.replaceCharacters(in: range, with: " ")
+        }
+
+        return mutable
+    }
+
     private func footer(showCharacterCount: Bool) -> some View {
         HStack(spacing: 6) {
             if showCharacterCount {
@@ -274,6 +529,83 @@ struct ClipCardView: View {
                     )
             }
         }
+    }
+
+    private var imagePreview: NSImage? {
+        guard let payloadData = item.payloadData else { return nil }
+        return NSImage(data: payloadData)
+    }
+
+    private var firstFilePath: String? {
+        item.filePaths.first
+    }
+
+    private var filePreviewImage: NSImage? {
+        guard let firstFilePath else { return nil }
+        if let cached = filePreviewStore.preview(for: firstFilePath) {
+            return cached
+        }
+        return NSImage(contentsOfFile: firstFilePath)
+    }
+
+    private var filePreviewIcon: NSImage? {
+        guard let firstFilePath else { return nil }
+        let icon = NSWorkspace.shared.icon(forFile: firstFilePath)
+        icon.size = NSSize(width: 58, height: 58)
+        return icon
+    }
+
+    private var fileTitle: String {
+        guard let firstFilePath else { return "Files" }
+
+        let firstName = URL(fileURLWithPath: firstFilePath).lastPathComponent
+        let displayName = firstName.isEmpty ? firstFilePath : firstName
+
+        if item.filePaths.count > 1 {
+            return "\(displayName) +\(item.filePaths.count - 1) more"
+        }
+
+        return displayName
+    }
+
+    private var fileSubtitle: String {
+        guard let firstFilePath else { return "No path available" }
+        return firstFilePath
+    }
+
+    private var codeSnippetText: String {
+        item.content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .prefix(6)
+            .joined(separator: "\n")
+    }
+
+    private var structuredSnippetText: String {
+        guard let format = item.structuredFormat else {
+            return codeSnippetText
+        }
+
+        switch format {
+        case .json:
+            return prettyPrintedJSONSnippet ?? codeSnippetText
+        case .xml, .csv:
+            return codeSnippetText
+        }
+    }
+
+    private var prettyPrintedJSONSnippet: String? {
+        guard let data = item.content.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data, options: []),
+              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+              let prettyString = String(data: pretty, encoding: .utf8) else {
+            return nil
+        }
+
+        return prettyString
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .prefix(6)
+            .joined(separator: "\n")
     }
 
     private var linkPreview: LinkPreviewData? {

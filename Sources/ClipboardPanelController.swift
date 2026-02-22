@@ -197,6 +197,13 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             return true
         }
 
+        // If search is visible but no text input owns focus yet, keep feeding
+        // typeahead characters directly so fast typing is not dropped.
+        if store.isSearchExpanded, !isTextInputFocused(), let typed = typeaheadCharacters(from: event) {
+            store.beginSearch(with: typed)
+            return true
+        }
+
         switch event.keyCode {
         case 123: // Left arrow
             store.moveSelection(delta: -1)
@@ -208,6 +215,10 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
             copySelectedItem()
             return true
         case 51, 117: // Delete/Backspace, Forward Delete
+            // When the search field is focused, delete keys should edit query text.
+            if store.isSearchExpanded, isTextInputFocused() {
+                return false
+            }
             store.deleteSelectedItem()
             return true
         case 53: // Escape
@@ -295,6 +306,10 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
     private func isCollapsedSearchInlineEditorActive() -> Bool {
         guard !store.isSearchExpanded else { return false }
+        return isTextInputFocused()
+    }
+
+    private func isTextInputFocused() -> Bool {
         guard let panel else { return false }
         guard let firstResponder = panel.firstResponder else { return false }
 

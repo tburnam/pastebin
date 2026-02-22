@@ -163,13 +163,9 @@ final class ClipboardStore: ObservableObject {
 
     func insert(captured: CapturedClipboardItem) {
         do {
-            let inserted = try database.insert(
-                content: captured.content,
-                sourceBundleID: captured.sourceBundleID,
-                sourceAppName: captured.sourceAppName
-            )
+            let inserted = try database.insert(captured: captured)
 
-            if let duplicateIndex = items.firstIndex(where: { $0.id == inserted.id || $0.content == inserted.content }) {
+            if let duplicateIndex = items.firstIndex(where: { $0.id == inserted.id }) {
                 items.remove(at: duplicateIndex)
             }
 
@@ -1052,14 +1048,7 @@ final class ClipboardStore: ObservableObject {
     }
 
     private func item(_ item: ClipItem, replacingCustomTitleWith customTitle: String?) -> ClipItem {
-        ClipItem(
-            id: item.id,
-            content: item.content,
-            copiedAt: item.copiedAt,
-            sourceBundleID: item.sourceBundleID,
-            sourceAppName: item.sourceAppName,
-            customTitle: customTitle
-        )
+        item.withCustomTitle(customTitle)
     }
 
     private func clampSelectedIndex() {
