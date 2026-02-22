@@ -33,8 +33,10 @@ final class ClipboardStore: ObservableObject {
     private var selectedBucketLoadRequestID: UInt64 = 0
 
     private var iconCache: [String: NSImage] = [:]
+    private var iconCacheInsertOrder: [String] = []
     private var missingBundleIDs: Set<String> = []
     private var pendingIconLookups: Set<String> = []
+    private var hasScheduledIconRefresh = false
 
     private let filterQueue = DispatchQueue(label: "pastebin.search.queue", qos: .userInitiated)
     private let bucketLoadQueue = DispatchQueue(label: "pastebin.bucket.load.queue", qos: .userInitiated, attributes: .concurrent)
@@ -58,6 +60,9 @@ final class ClipboardStore: ObservableObject {
     private static let unfilteredDisplayLimit = 1_200
     private static let searchResultLimit = 250
     private static let searchDebounceInterval: TimeInterval = 0.04
+    private static let mainThreadSynchronousFilterItemThreshold = 72
+    private static let maxCachedIcons = 320
+    private static let maxMissingBundleIDs = 1_024
 
     private enum BucketFetchMode {
         case background
@@ -612,13 +617,9 @@ final class ClipboardStore: ObservableObject {
                 self.pendingIconLookups.remove(bundleID)
 
                 if let resolvedIcon {
-                    let alreadyCached = self.iconCache[bundleID] != nil
-                    self.iconCache[bundleID] = resolvedIcon
-                    if !alreadyCached {
-                        self.objectWillChange.send()
-                    }
+                    self.cacheResolvedIcon(resolvedIcon, for: bundleID)
                 } else {
-                    self.missingBundleIDs.insert(bundleID)
+                    self.markMissingBundleID(bundleID)
                 }
             }
         }
@@ -628,6 +629,40 @@ final class ClipboardStore: ObservableObject {
 
     private func fallbackIcon() -> NSImage? {
         fallbackIconImage
+    }
+
+    private func cacheResolvedIcon(_ icon: NSImage, for bundleID: String) {
+        guard iconCache[bundleID] == nil else { return }
+        iconCache[bundleID] = icon
+        iconCacheInsertOrder.append(bundleID)
+
+        if iconCacheInsertOrder.count > Self.maxCachedIcons {
+            let overflow = iconCacheInsertOrder.count - Self.maxCachedIcons
+            for i in 0..<overflow {
+                iconCache[iconCacheInsertOrder[i]] = nil
+            }
+            iconCacheInsertOrder.removeFirst(overflow)
+        }
+
+        scheduleIconRefresh()
+    }
+
+    private func markMissingBundleID(_ bundleID: String) {
+        missingBundleIDs.insert(bundleID)
+        if missingBundleIDs.count > Self.maxMissingBundleIDs {
+            missingBundleIDs = Set(missingBundleIDs.prefix(Self.maxMissingBundleIDs))
+        }
+    }
+
+    private func scheduleIconRefresh() {
+        guard !hasScheduledIconRefresh else { return }
+        hasScheduledIconRefresh = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.hasScheduledIconRefresh = false
+            self.objectWillChange.send()
+        }
     }
 
     // MARK: - Internals
@@ -714,7 +749,11 @@ final class ClipboardStore: ObservableObject {
             return filtered
         }
 
-        if debounce <= 0, Thread.isMainThread {
+        if shouldFilterImmediatelyOnMainThread(
+            debounce: debounce,
+            query: querySnapshot,
+            itemCount: itemsSnapshot.count
+        ) {
             let filtered = computeFiltered()
             let applySignpostID = OSSignpostID(log: perfLog)
             os_signpost(
@@ -790,6 +829,16 @@ final class ClipboardStore: ObservableObject {
         } else {
             filterQueue.asyncAfter(deadline: .now() + debounce, execute: work)
         }
+    }
+
+    private func shouldFilterImmediatelyOnMainThread(
+        debounce: TimeInterval,
+        query: String,
+        itemCount: Int
+    ) -> Bool {
+        guard debounce <= 0, Thread.isMainThread else { return false }
+        guard query.isEmpty else { return false }
+        return itemCount <= Self.mainThreadSynchronousFilterItemThreshold
     }
 
     private func reloadSelectedBucketItems() {

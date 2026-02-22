@@ -7,19 +7,32 @@ struct LinkPreviewData {
     let image: NSImage?
 }
 
+private final class CachedLinkPreviewData: NSObject {
+    let value: LinkPreviewData
+
+    init(_ value: LinkPreviewData) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class LinkPreviewStore: ObservableObject {
-    @Published private var cachedData: [URL: LinkPreviewData] = [:]
+    private let cachedData: NSCache<NSURL, CachedLinkPreviewData> = {
+        let cache = NSCache<NSURL, CachedLinkPreviewData>()
+        cache.countLimit = 320
+        return cache
+    }()
     private var inFlightURLs: Set<URL> = []
     private var activeProviders: [URL: LPMetadataProvider] = [:]
     private let metadataTimeout: TimeInterval = 5
+    private var hasScheduledChangeNotification = false
 
     func preview(for url: URL) -> LinkPreviewData? {
-        cachedData[url]
+        cachedData.object(forKey: url as NSURL)?.value
     }
 
     func loadPreview(for url: URL) {
-        guard cachedData[url] == nil else { return }
+        guard cachedData.object(forKey: url as NSURL) == nil else { return }
         guard !inFlightURLs.contains(url) else { return }
 
         inFlightURLs.insert(url)
@@ -48,9 +61,24 @@ final class LinkPreviewStore: ObservableObject {
 
     private func complete(url: URL, title: String?, image: NSImage?) {
         let normalizedTitle = title.flatMap { $0.isEmpty ? nil : $0 }
-        cachedData[url] = LinkPreviewData(title: normalizedTitle, image: image)
+        cachedData.setObject(
+            CachedLinkPreviewData(LinkPreviewData(title: normalizedTitle, image: image)),
+            forKey: url as NSURL
+        )
         inFlightURLs.remove(url)
         activeProviders[url] = nil
+        scheduleChangeNotification()
+    }
+
+    private func scheduleChangeNotification() {
+        guard !hasScheduledChangeNotification else { return }
+        hasScheduledChangeNotification = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.hasScheduledChangeNotification = false
+            self.objectWillChange.send()
+        }
     }
 
     nonisolated private static func resolveImage(from metadata: LPLinkMetadata, completion: @escaping (NSImage?) -> Void) {

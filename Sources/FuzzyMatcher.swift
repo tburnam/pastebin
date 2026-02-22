@@ -18,15 +18,15 @@ enum FuzzyMatcher {
         // Keeps recency order from `items`.
         let queryTokens = normalizedQuery
             .split(whereSeparator: { $0.unicodeScalars.allSatisfy { delimiterSet.contains($0) } })
-            .map(String.init)
 
         if !queryTokens.isEmpty {
+            let tokenByteArrays = queryTokens.map { ContiguousArray(String($0).utf8) }
             var strictMatches: [ClipItem] = []
             strictMatches.reserveCapacity(min(limit, items.count))
 
             for item in items {
-                if queryTokens.allSatisfy({ token in
-                    item.searchableContent.contains(token)
+                if tokenByteArrays.allSatisfy({ tokenBytes in
+                    containsBytes(item.searchableContentUTF8, tokenBytes)
                 }) {
                     strictMatches.append(item)
                     if strictMatches.count >= limit {
@@ -41,12 +41,12 @@ enum FuzzyMatcher {
         }
 
         // Fallback: fuzzy subsequence matching for typo tolerance when strict search returns nothing.
-        let queryCharacters = Array(normalizedQuery)
+        let queryUTF8 = ContiguousArray(normalizedQuery.utf8)
         var topMatches: [(item: ClipItem, score: Int)] = []
         topMatches.reserveCapacity(min(items.count, limit))
 
         for item in items {
-            if let score = score(query: queryCharacters, in: item.searchableContent) {
+            if let score = score(queryUTF8: queryUTF8, in: item.searchableContentUTF8) {
                 let candidate = (item: item, score: score)
 
                 if topMatches.count < limit {
@@ -72,26 +72,67 @@ enum FuzzyMatcher {
             .lowercased()
     }
 
-    private static func score(query: [Character], in candidate: String) -> Int? {
-        guard !query.isEmpty else {
+    // MARK: - Byte-level substring containment (uses memcmp for SIMD-accelerated comparison)
+
+    private static func containsBytes(
+        _ haystack: ContiguousArray<UInt8>,
+        _ needle: ContiguousArray<UInt8>
+    ) -> Bool {
+        let needleCount = needle.count
+        guard needleCount > 0 else { return true }
+        guard haystack.count >= needleCount else { return false }
+
+        return haystack.withUnsafeBufferPointer { haystackBuf in
+            needle.withUnsafeBufferPointer { needleBuf in
+                let searchLimit = haystackBuf.count - needleBuf.count
+                let firstByte = needleBuf[0]
+
+                for i in 0...searchLimit {
+                    if haystackBuf[i] == firstByte {
+                        if needleCount == 1 {
+                            return true
+                        }
+                        if memcmp(
+                            haystackBuf.baseAddress! + i + 1,
+                            needleBuf.baseAddress! + 1,
+                            needleCount - 1
+                        ) == 0 {
+                            return true
+                        }
+                    }
+                }
+                return false
+            }
+        }
+    }
+
+    // MARK: - Byte-level fuzzy scoring
+
+    private static func score(
+        queryUTF8: ContiguousArray<UInt8>,
+        in candidate: ContiguousArray<UInt8>
+    ) -> Int? {
+        guard !queryUTF8.isEmpty else {
             return 0
         }
 
-        let candidateCharacters = Array(candidate)
-        guard candidateCharacters.count >= query.count else {
+        let candidateCount = candidate.count
+        guard candidateCount >= queryUTF8.count else {
             return nil
         }
 
         var queryIndex = 0
         var lastMatchIndex = -2
         var score = 0
+        let queryCount = queryUTF8.count
 
-        for candidateIndex in candidateCharacters.indices {
-            if queryIndex >= query.count {
+        for candidateIndex in 0..<candidateCount {
+            if queryIndex >= queryCount {
                 break
             }
 
-            guard candidateCharacters[candidateIndex] == query[queryIndex] else {
+            let byte = candidate[candidateIndex]
+            guard byte == queryUTF8[queryIndex] else {
                 continue
             }
 
@@ -101,7 +142,7 @@ enum FuzzyMatcher {
                 score += 18
             }
 
-            if candidateIndex == 0 || isDelimiter(candidateCharacters[candidateIndex - 1]) {
+            if candidateIndex == 0 || isDelimiterByte(candidate[candidateIndex - 1]) {
                 score += 12
             }
 
@@ -110,13 +151,21 @@ enum FuzzyMatcher {
             queryIndex += 1
             lastMatchIndex = candidateIndex
 
-            if queryIndex == query.count {
-                score += max(0, 30 - (candidateCharacters.count - candidateIndex))
+            if queryIndex == queryCount {
+                score += max(0, 30 - (candidateCount - candidateIndex))
                 return score
             }
         }
 
         return nil
+    }
+
+    @inline(__always)
+    private static func isDelimiterByte(_ byte: UInt8) -> Bool {
+        if byte >= 0x61 && byte <= 0x7A { return false } // a-z
+        if byte >= 0x30 && byte <= 0x39 { return false } // 0-9
+        if byte >= 0x80 { return false } // multi-byte UTF8 (content character, not delimiter)
+        return true
     }
 
     private static func insertSorted(
@@ -141,9 +190,5 @@ enum FuzzyMatcher {
         }
 
         return lhs.item.copiedAt > rhs.item.copiedAt
-    }
-
-    private static func isDelimiter(_ character: Character) -> Bool {
-        character.unicodeScalars.contains { delimiterSet.contains($0) }
     }
 }

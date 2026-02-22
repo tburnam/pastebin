@@ -59,6 +59,10 @@ enum ClipContentType: Equatable {
 }
 
 struct ClipItem: Identifiable, Equatable {
+    static func == (lhs: ClipItem, rhs: ClipItem) -> Bool {
+        lhs.id == rhs.id && lhs.copiedAt == rhs.copiedAt && lhs.customTitle == rhs.customTitle
+    }
+
     private static let previewCharacterLimit = 420
 
     let id: Int64
@@ -80,6 +84,7 @@ struct ClipItem: Identifiable, Equatable {
     let htmlContent: String?
     let dedupeKey: String
     let searchableContent: String
+    let searchableContentUTF8: ContiguousArray<UInt8>
     let characterCount: Int
     let previewText: String
 
@@ -144,10 +149,12 @@ struct ClipItem: Identifiable, Equatable {
         let normalizedDedupeKey = dedupeKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.dedupeKey = (normalizedDedupeKey?.isEmpty == false) ? normalizedDedupeKey! : content
 
-        self.searchableContent = ([content, self.customTitle].compactMap { $0 })
+        let searchable = ([content, self.customTitle].compactMap { $0 })
             .joined(separator: " ")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
+        self.searchableContent = searchable
+        self.searchableContentUTF8 = ContiguousArray(searchable.utf8)
         self.characterCount = content.count
 
         let previewBase = Self.previewBase(
@@ -351,15 +358,49 @@ struct ClipItem: Identifiable, Equatable {
     }
 
     private static func truncatedPreview(_ value: String) -> String {
-        value.count > previewCharacterLimit
-            ? String(value.prefix(previewCharacterLimit - 3)) + "..."
-            : value
+        // O(1) fast path: UTF8 byte count is an upper bound on character count
+        if value.utf8.count <= previewCharacterLimit {
+            return value
+        }
+        // O(k) check instead of O(n) count for long strings
+        guard let _ = value.index(value.startIndex, offsetBy: previewCharacterLimit, limitedBy: value.endIndex) else {
+            return value
+        }
+        return String(value.prefix(previewCharacterLimit - 3)) + "..."
     }
 
     private static func compactPreview(_ value: String) -> String {
-        value
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        var collapsed = String()
+        collapsed.reserveCapacity(trimmed.count)
+
+        var lastWasWhitespace = false
+        for scalar in trimmed.unicodeScalars {
+            let v = scalar.value
+            // ASCII fast path avoids CharacterSet lookup for the common case
+            let isWS: Bool
+            if v <= 0x20 {
+                isWS = v == 0x20 || (v >= 0x09 && v <= 0x0D)
+            } else if v < 0x80 {
+                isWS = false
+            } else {
+                isWS = CharacterSet.whitespacesAndNewlines.contains(scalar)
+            }
+            if isWS {
+                if !lastWasWhitespace {
+                    collapsed.append(" ")
+                    lastWasWhitespace = true
+                }
+                continue
+            }
+
+            collapsed.unicodeScalars.append(scalar)
+            lastWasWhitespace = false
+        }
+
+        return collapsed
     }
 
     private static func filePathsFromLegacyContent(_ content: String, rawType: String?) -> [String] {

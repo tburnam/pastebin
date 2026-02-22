@@ -125,16 +125,47 @@ final class PasteboardMonitor {
 
     private func captureTextualContent(from pasteboard: NSPasteboard) -> CapturedClipboardItem? {
         let typeIdentifiers = pasteboardTypeIdentifiers(from: pasteboard)
-        let rtfData = pasteboard.data(forType: .rtf)
-        let htmlContent = pasteboard.string(forType: .html)
-        let linkURL = firstNonFileURL(from: pasteboard)
-
         let plainString = plainString(from: pasteboard)
-        let richTextPlain = plainTextFromRTF(rtfData) ?? plainTextFromHTML(htmlContent)
-        let candidate = plainString ?? richTextPlain
+        var rtfData: Data?
+        var htmlContent: String?
+        var didLoadRichPayloads = false
+
+        func loadRichPayloadsIfNeeded() {
+            guard !didLoadRichPayloads else { return }
+            rtfData = pasteboard.data(forType: .rtf)
+            htmlContent = pasteboard.string(forType: .html)
+            didLoadRichPayloads = true
+        }
+
+        var richTextPlainCache: String?
+        var didResolveRichTextPlain = false
+        func richTextPlain() -> String? {
+            if didResolveRichTextPlain {
+                return richTextPlainCache
+            }
+
+            didResolveRichTextPlain = true
+            loadRichPayloadsIfNeeded()
+            richTextPlainCache = plainTextFromRTF(rtfData) ?? plainTextFromHTML(htmlContent)
+            return richTextPlainCache
+        }
+
+        var linkURLCache: URL?
+        var didResolveLinkURL = false
+        func clipboardLinkURL() -> URL? {
+            if didResolveLinkURL {
+                return linkURLCache
+            }
+
+            didResolveLinkURL = true
+            linkURLCache = firstNonFileURL(from: pasteboard)
+            return linkURLCache
+        }
+
+        let candidate = plainString ?? richTextPlain()
 
         guard let candidate else {
-            if let linkURL {
+            if let linkURL = clipboardLinkURL() {
                 return CapturedClipboardItem(
                     content: linkURL.absoluteString,
                     contentTypeRaw: "link",
@@ -143,8 +174,9 @@ final class PasteboardMonitor {
                 )
             }
 
+            loadRichPayloadsIfNeeded()
             if rtfData != nil || htmlContent != nil {
-                let fallback = richTextPlain?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let fallback = richTextPlain()?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let content = (fallback?.isEmpty == false) ? fallback! : "Rich text content"
                 return CapturedClipboardItem(
                     content: content,
@@ -160,6 +192,7 @@ final class PasteboardMonitor {
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
+        let linkURL = clipboardLinkURL()
         let resolvedLinkURL = linkURL ?? standaloneWebURL(from: trimmed)
         if let resolvedLinkURL {
             let resolvedContent: String
@@ -197,9 +230,11 @@ final class PasteboardMonitor {
             )
         }
 
+        loadRichPayloadsIfNeeded()
         if rtfData != nil || htmlContent != nil {
-            let richContent = richTextPlain?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? richTextPlain!
+            let resolvedRichText = richTextPlain()
+            let richContent = resolvedRichText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? resolvedRichText!
                 : candidate
 
             return CapturedClipboardItem(
@@ -397,9 +432,18 @@ final class PasteboardMonitor {
         return seed
     }
 
+    private static let hexLookup: [UInt8] = Array("0123456789abcdef".utf8)
+
     private func dedupeKey(prefix: String, from data: Data) -> String {
         let digest = SHA256.hash(data: data)
-        let hex = digest.map { String(format: "%02x", $0) }.joined()
-        return "\(prefix):\(hex)"
+        var result = [UInt8]()
+        result.reserveCapacity(prefix.utf8.count + 1 + 64)
+        result.append(contentsOf: prefix.utf8)
+        result.append(UInt8(ascii: ":"))
+        for byte in digest {
+            result.append(Self.hexLookup[Int(byte >> 4)])
+            result.append(Self.hexLookup[Int(byte & 0x0F)])
+        }
+        return String(bytes: result, encoding: .utf8)!
     }
 }

@@ -77,10 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func write(item: ClipItem, to pasteboard: NSPasteboard) {
         switch item.contentType {
         case .image:
-            if let payloadData = item.payloadData,
-               let image = NSImage(data: payloadData),
-               pasteboard.writeObjects([image]) {
-                return
+            if let payloadData = item.payloadData {
+                if pasteboard.setData(payloadData, forType: .tiff) {
+                    return
+                }
+
+                if let image = NSImage(data: payloadData),
+                   pasteboard.writeObjects([image]) {
+                    return
+                }
             }
 
         case .fileList:

@@ -70,6 +70,31 @@ struct ClipCardView: View {
         "obsidian": blackAccent
     ]
     private static let richTextPreviewCache = NSCache<NSString, NSAttributedString>()
+    private static let imagePreviewCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 320
+        return cache
+    }()
+    private static let fileImageFallbackCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 320
+        return cache
+    }()
+    private static let fileIconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 320
+        return cache
+    }()
+    private static let jsonSnippetCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 320
+        return cache
+    }()
+    private static let codeSnippetCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 320
+        return cache
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -534,8 +559,17 @@ struct ClipCardView: View {
     }
 
     private var imagePreview: NSImage? {
-        guard let payloadData = item.payloadData else { return nil }
-        return NSImage(data: payloadData)
+        let cacheKey = item.dedupeKey as NSString
+        if let cached = Self.imagePreviewCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let payloadData = item.payloadData, let decoded = NSImage(data: payloadData) else {
+            return nil
+        }
+
+        Self.imagePreviewCache.setObject(decoded, forKey: cacheKey)
+        return decoded
     }
 
     private var firstFilePath: String? {
@@ -547,13 +581,31 @@ struct ClipCardView: View {
         if let cached = filePreviewStore.preview(for: firstFilePath) {
             return cached
         }
-        return NSImage(contentsOfFile: firstFilePath)
+
+        let cacheKey = firstFilePath as NSString
+        if let cached = Self.fileImageFallbackCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let loaded = NSImage(contentsOfFile: firstFilePath) else {
+            return nil
+        }
+
+        Self.fileImageFallbackCache.setObject(loaded, forKey: cacheKey)
+        return loaded
     }
 
     private var filePreviewIcon: NSImage? {
         guard let firstFilePath else { return nil }
-        let icon = NSWorkspace.shared.icon(forFile: firstFilePath)
+        let cacheKey = firstFilePath as NSString
+        if let cached = Self.fileIconCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        let baseIcon = NSWorkspace.shared.icon(forFile: firstFilePath)
+        let icon = (baseIcon.copy() as? NSImage) ?? baseIcon
         icon.size = NSSize(width: 58, height: 58)
+        Self.fileIconCache.setObject(icon, forKey: cacheKey)
         return icon
     }
 
@@ -576,11 +628,17 @@ struct ClipCardView: View {
     }
 
     private var codeSnippetText: String {
-        item.content
+        let cacheKey = item.dedupeKey as NSString
+        if let cached = Self.codeSnippetCache.object(forKey: cacheKey) {
+            return cached as String
+        }
+        let snippet = item.content
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .prefix(6)
             .joined(separator: "\n")
+        Self.codeSnippetCache.setObject(snippet as NSString, forKey: cacheKey)
+        return snippet
     }
 
     private var structuredSnippetText: String {
@@ -597,6 +655,11 @@ struct ClipCardView: View {
     }
 
     private var prettyPrintedJSONSnippet: String? {
+        let cacheKey = item.dedupeKey as NSString
+        if let cached = Self.jsonSnippetCache.object(forKey: cacheKey) {
+            return cached as String
+        }
+
         guard let data = item.content.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data, options: []),
               let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
@@ -604,10 +667,13 @@ struct ClipCardView: View {
             return nil
         }
 
-        return prettyString
+        let snippet = prettyString
             .split(separator: "\n", omittingEmptySubsequences: false)
             .prefix(6)
             .joined(separator: "\n")
+
+        Self.jsonSnippetCache.setObject(snippet as NSString, forKey: cacheKey)
+        return snippet
     }
 
     private var linkPreview: LinkPreviewData? {

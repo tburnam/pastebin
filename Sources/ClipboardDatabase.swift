@@ -38,7 +38,7 @@ final class ClipboardDatabase {
 
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    private static let latestUserVersion: Int32 = 3
+    private static let latestUserVersion: Int32 = 4
 
     init(url: URL) throws {
         databasePath = url.path
@@ -60,6 +60,10 @@ final class ClipboardDatabase {
             try execute("PRAGMA journal_mode = WAL;")
             try execute("PRAGMA synchronous = NORMAL;")
             try execute("PRAGMA foreign_keys = ON;")
+            try execute("PRAGMA busy_timeout = 2000;")
+            try execute("PRAGMA temp_store = MEMORY;")
+            try execute("PRAGMA mmap_size = 268435456;")
+            try execute("PRAGMA cache_size = -8000;")
 
             try execute("""
             CREATE TABLE IF NOT EXISTS clip_items (
@@ -71,7 +75,6 @@ final class ClipboardDatabase {
             );
             """)
             try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_copied_at ON clip_items(copied_at DESC);")
-            try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_content ON clip_items(content);")
 
             try runMigrationsIfNeeded()
             try openInteractiveReadConnection()
@@ -602,15 +605,17 @@ final class ClipboardDatabase {
     private func runMigrationsIfNeeded() throws {
         guard let db else { return }
 
-        var pragmaStmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &pragmaStmt, nil) == SQLITE_OK else {
-            throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
-        }
-        defer { sqlite3_finalize(pragmaStmt) }
-
         var version: Int32 = 0
-        if sqlite3_step(pragmaStmt) == SQLITE_ROW {
-            version = sqlite3_column_int(pragmaStmt, 0)
+        do {
+            var pragmaStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &pragmaStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(pragmaStmt) }
+
+            if sqlite3_step(pragmaStmt) == SQLITE_ROW {
+                version = sqlite3_column_int(pragmaStmt, 0)
+            }
         }
 
         if version < 1 {
@@ -678,6 +683,12 @@ final class ClipboardDatabase {
             try execute("PRAGMA user_version = 3;")
         }
 
+        if version < 4 {
+            try execute("DROP INDEX IF EXISTS idx_clip_items_content;")
+            version = 4
+            try execute("PRAGMA user_version = 4;")
+        }
+
         if version < Self.latestUserVersion {
             try execute("PRAGMA user_version = \(Self.latestUserVersion);")
         }
@@ -723,6 +734,24 @@ final class ClipboardDatabase {
         }
 
         interactiveReadDB = handle
+        try executeOnInteractiveReadConnection("PRAGMA busy_timeout = 2000;")
+        try executeOnInteractiveReadConnection("PRAGMA query_only = ON;")
+        try executeOnInteractiveReadConnection("PRAGMA mmap_size = 268435456;")
+        try executeOnInteractiveReadConnection("PRAGMA cache_size = -4000;")
+    }
+
+    private func executeOnInteractiveReadConnection(_ sql: String) throws {
+        guard let interactiveReadDB else {
+            throw DatabaseError.openFailed("Interactive SQLite handle is not available")
+        }
+
+        var error: UnsafeMutablePointer<Int8>?
+        let result = sqlite3_exec(interactiveReadDB, sql, nil, nil, &error)
+        if result != SQLITE_OK {
+            let message = error.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(interactiveReadDB))
+            sqlite3_free(error)
+            throw DatabaseError.stepFailed(message)
+        }
     }
 
     private func fetchItems(inBucket bucketID: Int64, limit: Int, using db: OpaquePointer) throws -> [ClipItem] {

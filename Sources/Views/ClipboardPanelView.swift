@@ -57,7 +57,9 @@ struct ClipboardPanelView: View {
             }
         }
         .onPreferenceChange(BucketChipFramePreferenceKey.self) { frames in
-            bucketFrames = frames
+            if bucketFrames != frames {
+                bucketFrames = frames
+            }
         }
         .onAppear {
             isSearchFocused = store.isSearchExpanded
@@ -93,10 +95,14 @@ struct ClipboardPanelView: View {
         .frame(height: topControlHeight)
         .padding(.horizontal, 4)
         .onPreferenceChange(ShortcutHintsWidthPreferenceKey.self) { width in
-            shortcutHintsWidth = width
+            if shortcutHintsWidth != width {
+                shortcutHintsWidth = width
+            }
         }
         .onPreferenceChange(BucketStripContentWidthPreferenceKey.self) { width in
-            bucketStripContentWidth = width
+            if bucketStripContentWidth != width {
+                bucketStripContentWidth = width
+            }
         }
         .animation(.snappy(duration: 0.2), value: store.isSearchExpanded)
         .animation(.snappy(duration: 0.18), value: bucketStripContentWidth)
@@ -579,13 +585,7 @@ struct ClipboardPanelView: View {
     }
 
     private func bucketID(at location: CGPoint) -> Int64? {
-        for bucket in store.buckets {
-            guard let frame = bucketFrames[bucket.id] else { continue }
-            if frame.contains(location) {
-                return bucket.id
-            }
-        }
-        return nil
+        bucketFrames.first(where: { $0.value.contains(location) })?.key
     }
 
     private func playBucketDropPulse(bucketID: Int64) {
