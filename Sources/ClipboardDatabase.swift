@@ -314,6 +314,27 @@ final class ClipboardDatabase {
         }
     }
 
+    func deleteClipItem(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "DELETE FROM clip_items WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
     func deleteBucket(id: Int64) throws {
         try queue.sync {
             guard let db else {

@@ -110,7 +110,7 @@ struct ClipCardView: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 titleView
-                    .padding(.top, 1)
+                    .padding(.top, 4)
 
                 Text(relativeCopiedTime)
                     .font(.system(size: 9, weight: .regular, design: .rounded))

@@ -19,7 +19,7 @@ struct ClipboardPanelView: View {
     private let edgePadding: CGFloat = 14
     private let topControlHeight: CGFloat = 38
     private let chipVisualHeight: CGFloat = 29
-    private let searchToggleDiameter: CGFloat = 30
+    private let searchToggleDiameter: CGFloat = 29
     private let dragCoordinateSpaceName = "clipboard-panel-drag-space"
     private let searchPillWidth: CGFloat = 236
 
@@ -113,6 +113,7 @@ struct ClipboardPanelView: View {
                     .frame(width: stripWidth, alignment: .leading)
 
                 addBucketButton
+                    .pointingHandCursor()
             }
         }
         .frame(height: topControlHeight)
@@ -163,7 +164,7 @@ struct ClipboardPanelView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 bucketChipsRow
             }
-            .scrollClipDisabled(!store.isSearchExpanded)
+            .scrollClipDisabled(true)
             .onChange(of: store.selectedBucketID) { _, selectedBucketID in
                 guard let selectedBucketID else { return }
                 withAnimation(.snappy(duration: 0.22)) {
@@ -584,7 +585,8 @@ private struct ClipboardBucketChip: View {
     let isSelected: Bool
     let prefersCollapsedStyle: Bool
     let onTap: () -> Void
-    private let chipHeight: CGFloat = 27
+    private let chipHeight: CGFloat = 29
+    private let hitTargetHeight: CGFloat = 29
 
     var body: some View {
         Button(action: onTap) {
@@ -603,25 +605,31 @@ private struct ClipboardBucketChip: View {
             .padding(.horizontal, shouldShowExpandedVisual ? 10 : 0)
             .frame(minWidth: shouldShowExpandedVisual ? 0 : 22, alignment: shouldShowExpandedVisual ? .leading : .center)
             .frame(height: chipHeight)
+            .contentShape(Rectangle())
             .background {
                 Capsule()
                     .fill(isSelected ? .white.opacity(0.18) : .white.opacity(0.08))
                     .opacity(shouldShowExpandedVisual ? 1 : 0)
+                    .allowsHitTesting(false)
             }
             .overlay {
                 Capsule()
                     .stroke(isSelected ? .white.opacity(0.42) : .white.opacity(0.24), lineWidth: 0.8)
                     .opacity(shouldShowExpandedVisual ? 1 : 0)
+                    .allowsHitTesting(false)
             }
             .overlay {
                 if isSelected && !shouldShowExpandedVisual {
                     Circle()
                         .stroke(.white.opacity(0.56), lineWidth: 1.0)
                         .frame(width: 15, height: 15)
+                        .allowsHitTesting(false)
                 }
             }
         }
         .buttonStyle(.plain)
+        .frame(height: hitTargetHeight)
+        .contentShape(Rectangle())
         .pointingHandCursor()
     }
 
@@ -648,7 +656,7 @@ private struct BucketChip: View {
     @State private var isHovered = false
     @FocusState private var isRenameFocused: Bool
     private let chipHeight: CGFloat = 29
-    private let hitTargetHeight: CGFloat = 32
+    private let hitTargetHeight: CGFloat = 29
 
     var body: some View {
         Group {
@@ -701,6 +709,12 @@ private struct BucketChip: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .frame(height: hitTargetHeight)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    isHovered = prefersCollapsedStyle ? hovering : false
+                    if hovering { NSCursor.pointingHand.set() }
+                }
                 .simultaneousGesture(
                     TapGesture(count: 2).onEnded {
                         beginRename()
@@ -712,6 +726,7 @@ private struct BucketChip: View {
             Capsule()
                 .fill(backgroundFill)
                 .opacity(shouldShowExpandedVisual ? 1 : 0)
+                .allowsHitTesting(false)
         }
         .overlay {
             Capsule()
@@ -720,12 +735,14 @@ private struct BucketChip: View {
                     lineWidth: isDropTargeted || didJustReceiveDrop ? 1.6 : 0.8
                 )
                 .opacity(shouldShowExpandedVisual ? 1 : 0)
+                .allowsHitTesting(false)
         }
         .overlay {
             if isSelected && prefersCollapsedStyle && !shouldShowExpandedVisual {
                 Circle()
                     .stroke(.white.opacity(0.56), lineWidth: 1.0)
                     .frame(width: 15, height: 15)
+                    .allowsHitTesting(false)
             }
         }
         .overlay(alignment: .topTrailing) {
@@ -735,6 +752,7 @@ private struct BucketChip: View {
                     .foregroundStyle(Color(red: 0.35, green: 0.93, blue: 0.53))
                     .offset(x: 4, y: -4)
                     .transition(.scale.combined(with: .opacity))
+                    .allowsHitTesting(false)
             }
         }
         .scaleEffect(isDropTargeted ? 1.04 : (didJustReceiveDrop ? 1.07 : 1.0))
@@ -746,10 +764,6 @@ private struct BucketChip: View {
         .frame(height: hitTargetHeight)
         .contentShape(Rectangle())
         .pointingHandCursor(enabled: !isRenaming)
-        .onHover { hovering in
-            guard !isRenaming else { return }
-            isHovered = prefersCollapsedStyle ? hovering : false
-        }
         .onChange(of: prefersCollapsedStyle) { _, isCollapsedStyle in
             if !isCollapsedStyle {
                 isHovered = false
@@ -875,32 +889,16 @@ private struct BucketChip: View {
 
 private struct PointingHandCursorModifier: ViewModifier {
     let enabled: Bool
-    @State private var isHovering = false
 
     func body(content: Content) -> some View {
-        content
-            .onHover { hovering in
-                if enabled && hovering {
-                    guard !isHovering else { return }
-                    NSCursor.pointingHand.push()
-                    isHovering = true
-                    return
-                }
-
-                guard isHovering else { return }
-                NSCursor.pop()
-                isHovering = false
+        content.onContinuousHover { phase in
+            switch phase {
+            case .active:
+                if enabled { NSCursor.pointingHand.set() }
+            case .ended:
+                NSCursor.arrow.set()
             }
-            .onChange(of: enabled) { _, isEnabled in
-                guard !isEnabled, isHovering else { return }
-                NSCursor.pop()
-                isHovering = false
-            }
-            .onDisappear {
-                guard isHovering else { return }
-                NSCursor.pop()
-                isHovering = false
-            }
+        }
     }
 }
 

@@ -394,6 +394,30 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    func deleteSelectedItem() {
+        guard let item = selectedItem() else { return }
+
+        do {
+            try database.deleteClipItem(id: item.id)
+
+            items.removeAll(where: { $0.id == item.id })
+            scopedBucketItems.removeAll(where: { $0.id == item.id })
+
+            for bucketID in cachedBucketItemsByID.keys {
+                cachedBucketItemsByID[bucketID]?.removeAll(where: { $0.id == item.id })
+            }
+
+            let count = filteredItems.count
+            if selectedIndex >= count {
+                selectedIndex = max(count - 1, 0)
+            }
+
+            scheduleFiltering(debounce: 0)
+        } catch {
+            print("Failed deleting clip item: \(error)")
+        }
+    }
+
     func deleteBucket(bucketID: Int64) {
         do {
             try database.deleteBucket(id: bucketID)

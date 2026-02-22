@@ -207,6 +207,9 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         case 36, 76: // Enter: copy and close
             copySelectedItem()
             return true
+        case 51, 117: // Delete/Backspace, Forward Delete
+            store.deleteSelectedItem()
+            return true
         case 53: // Escape
             if store.query.isEmpty {
                 store.collapseSearchIfPossible()
