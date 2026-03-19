@@ -213,15 +213,14 @@ final class ClipboardStore: ObservableObject {
     @Published private(set) var selectedBucketID: Int64?
     @Published var isSearchExpanded = false
     @Published private(set) var isInlineTitleEditorActive = false
+    @Published private(set) var shouldFocusSearchField = false
+    @Published private(set) var searchFieldFocusRevision: UInt64 = 0
 
     @Published var query: String = "" {
         didSet {
             guard query != oldValue else { return }
             if !query.isEmpty, !isSearchExpanded {
                 isSearchExpanded = true
-            }
-            if selectedIndex != 0 {
-                selectedIndex = 0
             }
             scheduleFiltering(debounce: query.isEmpty ? 0 : Self.searchDebounceInterval)
         }
@@ -265,9 +264,11 @@ final class ClipboardStore: ObservableObject {
     private let iconLookupQueue = DispatchQueue(label: "pastebin.icon.lookup.queue", qos: .userInitiated, attributes: .concurrent)
     private var pendingFilterWork: DispatchWorkItem?
     private var pendingNavigationRenderIdleWork: DispatchWorkItem?
+    private var pendingSelectionRestoreItemID: Int64?
     private var filterRequestID: UInt64 = 0
     private var searchCorpusRevision: UInt64 = 0
     private var searchCache: SearchCache?
+    private var visibleNormalizedQuery = ""
     private var hasNavigationRenderActivity = false
     private let performanceLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "PasteBin",
@@ -285,8 +286,8 @@ final class ClipboardStore: ObservableObject {
     private static let initialIconPreloadCount = 24
     private static let unfilteredDisplayLimit = 1_200
     private static let searchResultLimit = 120
-    private static let searchDebounceInterval: TimeInterval = 0.15
-    private static let fuzzyFallbackIdleDelay: TimeInterval = 0.18
+    private static let searchDebounceInterval: TimeInterval = 0.05
+    private static let fuzzyFallbackIdleDelay: TimeInterval = 0
     private static let fuzzyFallbackPollInterval: TimeInterval = 0.008
     private static let navigationRenderIdleDelay: TimeInterval = 0.18
     private static let indexedDirectResultPoolLimit = 240
@@ -305,6 +306,11 @@ final class ClipboardStore: ObservableObject {
         case localStrict
         case extendedStrict
         case indexedStrict
+    }
+
+    private enum FilterSelectionBehavior {
+        case preserveCurrent
+        case resetToFirstResult
     }
 
     private struct SearchScopeKey: Equatable {
@@ -413,9 +419,11 @@ final class ClipboardStore: ObservableObject {
         isInlineTitleEditorActive = false
         isBucketScopeLoading = false
         scopedBucketItems = []
+        pendingSelectionRestoreItemID = nil
         pendingNavigationRenderIdleWork?.cancel()
         pendingNavigationRenderIdleWork = nil
         hasNavigationRenderActivity = false
+        relinquishSearchFieldFocus()
         setSearchComputationInFlight(false, requestID: filterRequestID)
         setSearchRenderMode(.fullIdle, requestID: filterRequestID)
         bumpSearchCorpusRevision()
@@ -506,6 +514,17 @@ final class ClipboardStore: ObservableObject {
 
         isSearchExpanded = true
         query += sanitized
+        requestSearchFieldFocus()
+    }
+
+    func requestSearchFieldFocus() {
+        shouldFocusSearchField = true
+        searchFieldFocusRevision &+= 1
+    }
+
+    func relinquishSearchFieldFocus() {
+        shouldFocusSearchField = false
+        searchFieldFocusRevision &+= 1
     }
 
     func setInlineTitleEditorActive(_ isActive: Bool) {
@@ -706,8 +725,15 @@ final class ClipboardStore: ObservableObject {
             }
 
             if let removedFilteredIndex = filteredItems.firstIndex(where: { $0.id == item.id }) {
+                pendingSelectionRestoreItemID = Self.preferredSelectionRestoreItemID(
+                    afterRemovingItemAt: removedFilteredIndex,
+                    from: filteredItems.map(\.id)
+                )
                 filteredItems.remove(at: removedFilteredIndex)
-                if selectedIndex > removedFilteredIndex {
+                if let pendingSelectionRestoreItemID,
+                   let restoredIndex = filteredItems.firstIndex(where: { $0.id == pendingSelectionRestoreItemID }) {
+                    selectedIndex = restoredIndex
+                } else if selectedIndex > removedFilteredIndex {
                     selectedIndex -= 1
                 }
                 clampSelectedIndex()
@@ -832,6 +858,7 @@ final class ClipboardStore: ObservableObject {
     func selectByID(_ id: Int64) {
         guard let index = filteredItems.firstIndex(where: { $0.id == id }) else { return }
         guard index != selectedIndex else { return }
+        markNavigationRenderActivity()
         selectedIndex = index
     }
 
@@ -1033,6 +1060,105 @@ final class ClipboardStore: ObservableObject {
         prewarmBucketCaches(excluding: selectedBucketID)
     }
 
+    private func applyFilteredItems(
+        _ newItems: [ClipItem],
+        selectionBehavior: FilterSelectionBehavior,
+        isFinalApply: Bool
+    ) {
+        let currentSelectionItemID: Int64?
+        switch selectionBehavior {
+        case .preserveCurrent:
+            currentSelectionItemID = currentSelectedItemID
+        case .resetToFirstResult:
+            currentSelectionItemID = nil
+        }
+        let restoreSelectionItemID = pendingSelectionRestoreItemID ?? currentSelectionItemID
+
+        if !filteredItemsMatch(newItems) {
+            filteredItems = newItems
+        }
+
+        if let restoreSelectionItemID,
+           let restoredIndex = newItems.firstIndex(where: { $0.id == restoreSelectionItemID }) {
+            if selectedIndex != restoredIndex {
+                selectedIndex = restoredIndex
+            }
+            if pendingSelectionRestoreItemID == restoreSelectionItemID {
+                pendingSelectionRestoreItemID = nil
+            }
+        } else if isFinalApply, pendingSelectionRestoreItemID != nil {
+            pendingSelectionRestoreItemID = nil
+        }
+
+        if restoreSelectionItemID == nil, selectionBehavior == .resetToFirstResult, selectedIndex != 0 {
+            selectedIndex = 0
+        }
+
+        clampSelectedIndex()
+    }
+
+    private func provisionalFilteredItems(
+        normalizedQuery: String,
+        queryTokens: [Substring],
+        items: [ClipItem],
+        queryChanged: Bool,
+        previousCache: SearchCache?,
+        searchScopeKey: SearchScopeKey,
+        searchLimit: Int,
+        unfilteredLimit: Int
+    ) -> [ClipItem] {
+        if !queryChanged {
+            let itemIDs = Set(items.map(\.id))
+            return filteredItems.filter { itemIDs.contains($0.id) }
+        }
+
+        guard !normalizedQuery.isEmpty else {
+            return Array(items.prefix(unfilteredLimit))
+        }
+
+        let strictSearchPool = reusableLocalStrictSearchPool(
+            previousCache: previousCache,
+            for: searchScopeKey,
+            normalizedQuery: normalizedQuery
+        ) ?? items
+
+        let strictMatches = FuzzyMatcher.strictFilter(
+            normalizedQuery: normalizedQuery,
+            in: strictSearchPool,
+            limit: Self.strictRerankCandidateLimit
+        )
+
+        guard !strictMatches.isEmpty else {
+            return []
+        }
+
+        return SearchRanker.rerank(
+            normalizedQuery: normalizedQuery,
+            queryTokens: queryTokens,
+            candidates: strictMatches,
+            limit: searchLimit
+        )
+    }
+
+    static func preferredSelectionRestoreItemID(
+        afterRemovingItemAt removedIndex: Int,
+        from itemIDs: [Int64]
+    ) -> Int64? {
+        guard itemIDs.indices.contains(removedIndex) else { return nil }
+
+        let nextIndex = removedIndex + 1
+        if itemIDs.indices.contains(nextIndex) {
+            return itemIDs[nextIndex]
+        }
+
+        let previousIndex = removedIndex - 1
+        if itemIDs.indices.contains(previousIndex) {
+            return itemIDs[previousIndex]
+        }
+
+        return nil
+    }
+
     private func syncSelectionState() {
         selectionState.setSelectedItemID(currentSelectedItemID)
     }
@@ -1084,8 +1210,8 @@ final class ClipboardStore: ObservableObject {
         return previousCache.strictMatches
     }
 
-    private func beginSearchComputation(requestID: UInt64, hasSearchQuery: Bool) {
-        if hasSearchQuery {
+    private func beginSearchComputation(requestID: UInt64, shouldShowSearchComputationState: Bool) {
+        if shouldShowSearchComputationState {
             setSearchComputationInFlight(true, requestID: requestID)
         } else {
             setSearchComputationInFlight(false, requestID: requestID)
@@ -1166,6 +1292,7 @@ final class ClipboardStore: ObservableObject {
         let requestID = filterRequestID
         let querySnapshot = query
         let normalizedQuerySnapshot = FuzzyMatcher.normalize(querySnapshot)
+        let queryChanged = normalizedQuerySnapshot != visibleNormalizedQuery
         let hasSearchQuery = !normalizedQuerySnapshot.isEmpty
         let itemsSnapshot = selectedBucketID == nil ? items : scopedBucketItems
         let selectedBucketIDSnapshot = selectedBucketID
@@ -1188,7 +1315,10 @@ final class ClipboardStore: ObservableObject {
             && !strictTokens.isEmpty
             && indexEligibleTokens.count == strictTokens.count
         let itemsByID = Dictionary(uniqueKeysWithValues: itemsSnapshot.map { ($0.id, $0) })
-        beginSearchComputation(requestID: requestID, hasSearchQuery: hasSearchQuery)
+        beginSearchComputation(
+            requestID: requestID,
+            shouldShowSearchComputationState: hasSearchQuery && queryChanged
+        )
         let reusedLocalStrictPool = reusableLocalStrictSearchPool(
             previousCache: previousSearchCache,
             for: searchScopeKey,
@@ -1307,6 +1437,19 @@ final class ClipboardStore: ObservableObject {
 
             return shouldContinue()
         }
+        let shouldApplyProvisionalResults = !queryChanged
+        let provisionalFiltered = shouldApplyProvisionalResults
+            ? provisionalFilteredItems(
+                normalizedQuery: normalizedQuerySnapshot,
+                queryTokens: strictTokens,
+                items: itemsSnapshot,
+                queryChanged: queryChanged,
+                previousCache: previousSearchCache,
+                searchScopeKey: searchScopeKey,
+                searchLimit: searchLimit,
+                unfilteredLimit: unfilteredLimit
+            )
+            : nil
         let computeFiltered: (_ shouldContinue: @escaping () -> Bool) -> (filtered: [ClipItem], cache: SearchCache?) = { shouldContinue in
             os_signpost(
                 .begin,
@@ -1412,6 +1555,15 @@ final class ClipboardStore: ObservableObject {
             return (filtered, nextSearchCache)
         }
 
+        if let provisionalFiltered {
+            applyFilteredItems(
+                provisionalFiltered,
+                selectionBehavior: .preserveCurrent,
+                isFinalApply: false
+            )
+        }
+        visibleNormalizedQuery = normalizedQuerySnapshot
+
         var workItem: DispatchWorkItem?
         let shouldContinue: () -> Bool = {
             !(workItem?.isCancelled ?? false)
@@ -1445,10 +1597,12 @@ final class ClipboardStore: ObservableObject {
                 )
 
                 self.searchCache = computed.cache
-                if !self.filteredItemsMatch(computed.filtered) {
-                    self.filteredItems = computed.filtered
-                }
-                self.clampSelectedIndex()
+                self.applyFilteredItems(
+                    computed.filtered,
+                    selectionBehavior: queryChanged ? .resetToFirstResult : .preserveCurrent,
+                    isFinalApply: true
+                )
+                self.visibleNormalizedQuery = normalizedQuerySnapshot
                 self.endSearchComputation(requestID: requestID)
 
                 os_signpost(

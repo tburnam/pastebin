@@ -263,19 +263,6 @@ final class PasteboardMonitor {
             )
         }
 
-        if isSystemSourceCodeType(typeIdentifiers) {
-            let codeLanguage = codeLanguage(from: typeIdentifiers)
-            return CapturedClipboardItem(
-                content: cappedCandidate,
-                contentTypeRaw: "code",
-                codeLanguage: codeLanguage,
-                dedupeKey: dedupeKey(
-                    prefix: "code",
-                    from: ClipboardContentLimits.dedupeSeed(forText: (codeLanguage ?? "unknown") + "|" + cappedCandidate)
-                )
-            )
-        }
-
         loadRichPayloadsIfNeeded()
         if rtfData != nil || htmlContent != nil {
             let resolvedRichText = richTextPlain()
@@ -378,61 +365,6 @@ final class PasteboardMonitor {
             }
         ) {
             return .csv
-        }
-
-        return nil
-    }
-
-    private func isSystemSourceCodeType(_ typeIdentifiers: [String]) -> Bool {
-        typeIdentifiers.contains(
-            where: {
-                $0 == "public.source-code"
-                    || $0 == "public.script"
-                    || $0 == "public.swift-source"
-                    || $0 == "public.c-source"
-                    || $0 == "public.c-plus-plus-source"
-                    || $0 == "public.objective-c-source"
-                    || $0 == "public.objective-c-plus-plus-source"
-                    || $0 == "public.java-source"
-                    || $0 == "public.javascript"
-                    || $0 == "public.python-script"
-                    || $0 == "public.shell-script"
-                    || $0 == "public.ruby-script"
-            }
-        )
-    }
-
-    private func codeLanguage(from typeIdentifiers: [String]) -> String? {
-        if typeIdentifiers.contains("public.swift-source") {
-            return "swift"
-        }
-
-        if typeIdentifiers.contains("public.javascript") {
-            return "javascript"
-        }
-
-        if typeIdentifiers.contains(where: { $0.contains("typescript") }) {
-            return "typescript"
-        }
-
-        if typeIdentifiers.contains("public.python-script") {
-            return "python"
-        }
-
-        if typeIdentifiers.contains("public.shell-script") {
-            return "shell"
-        }
-
-        if typeIdentifiers.contains(where: { $0 == "public.c-source" || $0 == "public.c-plus-plus-source" || $0 == "public.objective-c-source" || $0 == "public.objective-c-plus-plus-source" }) {
-            return "c-family"
-        }
-
-        if typeIdentifiers.contains("public.java-source") {
-            return "java"
-        }
-
-        if typeIdentifiers.contains("public.ruby-script") {
-            return "ruby"
         }
 
         return nil

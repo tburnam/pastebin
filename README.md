@@ -17,13 +17,44 @@ A SwiftUI + AppKit menu-bar app that captures clipboard history into SQLite and 
   - `Backspace` to remove query chars
   - `Esc` clears query (or closes when query is empty)
 
+## Requirements
+
+- macOS 14 or later
+- Xcode command line tools or a full Xcode install
+- `create-dmg` for DMG packaging
+
 ## Run
 
 ```bash
 swift run
 ```
 
+## Build A Release
+
+```bash
+./release.sh
+```
+
+That script will:
+
+- build the release binary
+- generate a Retina-ready `AppIcon.icns` from `pastebinicon.png`
+- assemble `dist/PasteBin.app`
+- ad hoc sign the bundle by default so the packaged app is internally consistent
+- create a drag-to-Applications DMG in `dist/`
+- refresh `dist/PasteBin.app.zip`
+
+If you have a Developer ID signing identity, you can override the default ad hoc signature:
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./release.sh
+```
+
+## Install
+
+Open the generated DMG and drag `PasteBin.app` into `Applications`.
+
 ## Notes
 
-- Requires macOS with Swift toolchain and Xcode SDKs available.
 - If your machine only has Command Line Tools configured, point `xcode-select` at a full Xcode installation.
+- Sharing the app outside your own machine is much smoother with Developer ID signing and notarization. The script supports signing; notarization still needs to be done separately.

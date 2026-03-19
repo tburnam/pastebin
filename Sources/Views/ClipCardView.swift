@@ -202,12 +202,7 @@ struct ClipCardView: View {
 
     private var textContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
-                .font(.system(size: 13.5, weight: .regular, design: .rounded))
-                .foregroundStyle(.white.opacity(0.74))
-                .lineLimit(textPreviewLineLimit)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            plainTextBody(item.previewText.isEmpty ? "(empty)" : item.previewText)
                 .padding(.top, 12)
 
             Spacer(minLength: 0)
@@ -410,45 +405,41 @@ struct ClipCardView: View {
     }
 
     private func snippetPanel(text: String, monospaced: Bool, lineLimit: Int) -> some View {
-        Text(text.isEmpty ? "(empty)" : text)
-            .font(.system(size: 11.5, weight: .regular, design: monospaced ? .monospaced : .rounded))
-            .foregroundStyle(.white.opacity(0.74))
-            .lineLimit(lineLimit)
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(.white.opacity(0.12), lineWidth: 0.7)
-            )
+        contentSurface(stronger: true) {
+            Text(text.isEmpty ? "(empty)" : text)
+                .font(.system(size: 11.5, weight: .regular, design: monospaced ? .monospaced : .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(lineLimit)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder
     private var richTextPreview: some View {
         if isLightweightRendering {
-            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
-                .font(.system(size: 13.5, weight: .regular, design: .rounded))
-                .foregroundStyle(.white.opacity(0.74))
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            plainTextBody(item.previewText.isEmpty ? "(empty)" : item.previewText)
         } else if let attributed = richTextAttributedPreview, !attributed.characters.isEmpty {
             Text(attributed)
                 .font(.system(size: 13.5, weight: .regular, design: .rounded))
                 .foregroundStyle(.white.opacity(0.74))
+                .lineSpacing(2)
+                .lineLimit(textPreviewLineLimit)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
-                .font(.system(size: 13.5, weight: .regular, design: .rounded))
-                .foregroundStyle(.white.opacity(0.74))
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            plainTextBody(item.previewText.isEmpty ? "(empty)" : item.previewText)
         }
+    }
+
+    private func plainTextBody(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 13.5, weight: .regular, design: .rounded))
+            .foregroundStyle(.white.opacity(0.74))
+            .lineSpacing(2)
+            .lineLimit(textPreviewLineLimit)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var richTextAttributedPreview: AttributedString? {
@@ -483,6 +474,23 @@ struct ClipCardView: View {
                     )
             }
         }
+    }
+
+    private func contentSurface<Content: View>(
+        stronger: Bool,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.white.opacity(stronger ? 0.075 : 0.035))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(.white.opacity(stronger ? 0.14 : 0.08), lineWidth: 0.8)
+            }
     }
 
     private var firstFilePath: String? {

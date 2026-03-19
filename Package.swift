@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "PasteBin",
     platforms: [
-        .macOS(.v26)
+        .macOS(.v14)
     ],
     products: [
         .executable(
@@ -23,6 +23,11 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
+        ),
+        .testTarget(
+            name: "PasteBinTests",
+            dependencies: ["PasteBin"],
+            path: "Tests/PasteBinTests"
         )
     ]
 )

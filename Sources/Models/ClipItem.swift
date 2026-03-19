@@ -397,6 +397,8 @@ struct ClipItem: Identifiable, Equatable {
         structuredFormat: StructuredContentFormat?,
         hasFilePaths: Bool
     ) -> ClipContentType {
+        _ = codeLanguage
+
         switch rawType {
         case "link":
             if let linkURL {
@@ -405,7 +407,7 @@ struct ClipItem: Identifiable, Equatable {
             return .text
 
         case "code":
-            return .code(language: codeLanguage)
+            return .text
 
         case "image":
             return .image

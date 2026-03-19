@@ -218,9 +218,11 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         switch event.keyCode {
         case 123: // Left arrow
+            disengageSearchFieldForNavigation()
             store.moveSelection(delta: -1)
             return true
         case 124: // Right arrow
+            disengageSearchFieldForNavigation()
             store.moveSelection(delta: 1)
             return true
         case 36, 76: // Enter: copy and close
@@ -269,6 +271,11 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
     private func activateItem(_ item: ClipItem) {
         onSelect(item)
         close()
+    }
+
+    private func disengageSearchFieldForNavigation() {
+        store.relinquishSearchFieldFocus()
+        panel?.makeFirstResponder(nil)
     }
 
     private func commandIndex(for keyCode: UInt16) -> Int? {

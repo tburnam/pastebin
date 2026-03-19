@@ -4,10 +4,15 @@ set -euo pipefail
 APP_NAME="PasteBin"
 BUNDLE_ID="com.tylerburnam.pastebin"
 ICON_PNG="pastebinicon.png"
+MINIMUM_SYSTEM_VERSION="14.0"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+CREATE_DMG_RETRIES="${CREATE_DMG_RETRIES:-20}"
 DIST_DIR="dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
 ICON_ICNS="${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -29,59 +34,94 @@ find_latest_build() {
       latest_path="$candidate"
       latest_mtime="$mtime"
     fi
-  done < <(find .build -type f \( -path "*/release/${APP_NAME}" -o -path "*/debug/${APP_NAME}" \) 2>/dev/null)
+  done < <(find .build -type f -path "*/${BUILD_CONFIGURATION}/${APP_NAME}" 2>/dev/null)
 
   printf '%s\n' "$latest_path"
+}
+
+validate_icon_png() {
+  local width
+  local height
+
+  width="$(sips -g pixelWidth "$ICON_PNG" 2>/dev/null | awk '/pixelWidth/ { print $2 }')"
+  height="$(sips -g pixelHeight "$ICON_PNG" 2>/dev/null | awk '/pixelHeight/ { print $2 }')"
+
+  if [ -z "$width" ] || [ -z "$height" ]; then
+    echo "Unable to inspect icon source: $ICON_PNG" >&2
+    exit 1
+  fi
+
+  if [ "$width" != "$height" ]; then
+    echo "Icon source must be square. Found ${width}x${height}: $ICON_PNG" >&2
+    exit 1
+  fi
+
+  if [ "$width" -lt 1024 ]; then
+    echo "Icon source must be at least 1024x1024. Found ${width}x${height}: $ICON_PNG" >&2
+    exit 1
+  fi
 }
 
 generate_icns() {
   local input_png="$1"
   local output_icns="$2"
   local tmp_dir
-  local multi_tiff
+  local iconset_dir
 
   tmp_dir="$(mktemp -d)"
-  multi_tiff="${tmp_dir}/AppIconMulti.tiff"
+  iconset_dir="${tmp_dir}/AppIcon.iconset"
+  mkdir -p "$iconset_dir"
 
   trap 'rm -rf "$tmp_dir"' RETURN
 
-  sips -z 16 16 -s format tiff "$input_png" --out "${tmp_dir}/icon_16.tiff" >/dev/null
-  sips -z 32 32 -s format tiff "$input_png" --out "${tmp_dir}/icon_32.tiff" >/dev/null
-  sips -z 64 64 -s format tiff "$input_png" --out "${tmp_dir}/icon_64.tiff" >/dev/null
-  sips -z 128 128 -s format tiff "$input_png" --out "${tmp_dir}/icon_128.tiff" >/dev/null
-  sips -z 256 256 -s format tiff "$input_png" --out "${tmp_dir}/icon_256.tiff" >/dev/null
-  sips -z 512 512 -s format tiff "$input_png" --out "${tmp_dir}/icon_512.tiff" >/dev/null
-  sips -z 1024 1024 -s format tiff "$input_png" --out "${tmp_dir}/icon_1024.tiff" >/dev/null
+  sips -z 16 16 "$input_png" --out "${iconset_dir}/icon_16x16.png" >/dev/null
+  sips -z 32 32 "$input_png" --out "${iconset_dir}/icon_16x16@2x.png" >/dev/null
+  sips -z 32 32 "$input_png" --out "${iconset_dir}/icon_32x32.png" >/dev/null
+  sips -z 64 64 "$input_png" --out "${iconset_dir}/icon_32x32@2x.png" >/dev/null
+  sips -z 128 128 "$input_png" --out "${iconset_dir}/icon_128x128.png" >/dev/null
+  sips -z 256 256 "$input_png" --out "${iconset_dir}/icon_128x128@2x.png" >/dev/null
+  sips -z 256 256 "$input_png" --out "${iconset_dir}/icon_256x256.png" >/dev/null
+  sips -z 512 512 "$input_png" --out "${iconset_dir}/icon_256x256@2x.png" >/dev/null
+  sips -z 512 512 "$input_png" --out "${iconset_dir}/icon_512x512.png" >/dev/null
+  cp "$input_png" "${iconset_dir}/icon_512x512@2x.png"
 
-  tiffutil -cat \
-    "${tmp_dir}/icon_16.tiff" \
-    "${tmp_dir}/icon_32.tiff" \
-    "${tmp_dir}/icon_64.tiff" \
-    "${tmp_dir}/icon_128.tiff" \
-    "${tmp_dir}/icon_256.tiff" \
-    "${tmp_dir}/icon_512.tiff" \
-    "${tmp_dir}/icon_1024.tiff" \
-    -out "$multi_tiff" >/dev/null 2>&1
+  iconutil -c icns "$iconset_dir" -o "$output_icns"
+}
 
-  tiff2icns "$multi_tiff" "$output_icns"
+sign_app_if_configured() {
+  need_cmd codesign
+
+  if [ "$CODESIGN_IDENTITY" = "-" ]; then
+    codesign --force --deep --sign - "$APP_BUNDLE"
+    return
+  fi
+
+  codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 }
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 cd "$script_dir"
 
 need_cmd create-dmg
+need_cmd ditto
+need_cmd iconutil
+need_cmd plutil
 need_cmd sips
-need_cmd tiffutil
-need_cmd tiff2icns
+need_cmd swift
 
 if [ ! -f "$ICON_PNG" ]; then
   echo "Icon source not found: $ICON_PNG" >&2
   exit 1
 fi
 
+validate_icon_png
+
+echo "Building ${APP_NAME} (${BUILD_CONFIGURATION})..."
+swift build -c "$BUILD_CONFIGURATION"
+
 latest_build="$(find_latest_build)"
 if [ -z "$latest_build" ]; then
-  echo "No built ${APP_NAME} binary found in .build. Run 'swift build -c release' first." >&2
+  echo "No built ${APP_NAME} binary found in .build/${BUILD_CONFIGURATION}." >&2
   exit 1
 fi
 
@@ -95,7 +135,7 @@ bundle_version="$(date -r "$latest_build" '+%Y%m%d%H%M%S')"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$DIST_DIR"
-cp "$latest_build" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+ditto "$latest_build" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 generate_icns "$ICON_PNG" "$ICON_ICNS"
@@ -107,6 +147,8 @@ cat > "$INFO_PLIST" <<EOF_PLIST
 <dict>
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>${APP_NAME}</string>
   <key>CFBundleExecutable</key>
   <string>${APP_NAME}</string>
   <key>CFBundleIconFile</key>
@@ -123,23 +165,32 @@ cat > "$INFO_PLIST" <<EOF_PLIST
   <string>${short_version}</string>
   <key>CFBundleVersion</key>
   <string>${bundle_version}</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>${MINIMUM_SYSTEM_VERSION}</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
 </dict>
 </plist>
 EOF_PLIST
 
+plutil -lint "$INFO_PLIST" >/dev/null
+sign_app_if_configured
+
 dmg_path="${DIST_DIR}/${APP_NAME}-${build_stamp}.dmg"
 dmg_staging="$(mktemp -d)"
 trap 'rm -rf "$dmg_staging"' EXIT
-cp -R "$APP_BUNDLE" "$dmg_staging/"
-rm -f "$dmg_path"
+rm -f "$dmg_path" "$ZIP_PATH"
+find "$DIST_DIR" -maxdepth 1 -type f -name "rw.*.${APP_NAME}-*.dmg" -delete
+ditto "$APP_BUNDLE" "${dmg_staging}/${APP_NAME}.app"
 
 create-dmg \
   --volname "${APP_NAME}" \
   --volicon "$ICON_ICNS" \
+  --hdiutil-retries "$CREATE_DMG_RETRIES" \
   --window-pos 200 120 \
   --window-size 640 420 \
   --icon-size 120 \
@@ -149,6 +200,9 @@ create-dmg \
   "$dmg_path" \
   "$dmg_staging"
 
+ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
 echo "Latest build: $latest_build"
 echo "App bundle: ${APP_BUNDLE}"
+echo "ZIP: ${ZIP_PATH}"
 echo "DMG: ${dmg_path}"

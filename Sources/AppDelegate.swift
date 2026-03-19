@@ -44,8 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             applyRetentionPolicy(resetQuery: true)
             monitor.start()
         } catch {
-            assertionFailure("Failed to start PasteBin: \(error)")
-            NSApp.terminate(nil)
+            presentLaunchFailureAlert(for: error)
         }
     }
 
@@ -165,11 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            if let image = NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "PasteBin")
+            let iconSideLength: CGFloat = 14
+
+            if let image = StatusBarIconRenderer.makeMenuBarImage(sideLength: iconSideLength)
+                ?? NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "PasteBin")
                 ?? NSImage(systemSymbolName: "clipboard", accessibilityDescription: "PasteBin") {
-                image.isTemplate = true
                 button.image = image
                 button.imagePosition = .imageOnly
+                button.imageScaling = .scaleProportionallyDown
+                button.title = ""
             } else {
                 // Keep a visible target in the menu bar even if symbol lookup fails.
                 button.title = "PB"
@@ -195,6 +198,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
         self.statusItem = statusItem
+    }
+
+    private func presentLaunchFailureAlert(for error: Error) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "PasteBin couldn’t start."
+        alert.informativeText = """
+        \(error.localizedDescription)
+
+        Database location:
+        \(appSettings.databasePath)
+        """
+        alert.addButton(withTitle: "Quit")
+        alert.runModal()
+
+        NSApp.terminate(nil)
     }
 
     private func observeRetentionChanges() {

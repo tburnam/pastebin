@@ -9,6 +9,8 @@ private struct ClipStripSection: View {
     let filePreviewStore: FilePreviewStore
     let payloadPreviewStore: PayloadPreviewStore
     let onSelect: (Int64) -> Void
+    let onSelectionSync: (Int64) -> Void
+    let allowsViewportSelectionSync: Bool
     let onActivate: (ClipItem) -> Void
     let onDragChanged: (ClipItem, CGPoint) -> Void
     let onDragEnded: (ClipItem, CGPoint) -> Void
@@ -24,6 +26,8 @@ private struct ClipStripSection: View {
             filePreviewStore: filePreviewStore,
             payloadPreviewStore: payloadPreviewStore,
             onSelect: onSelect,
+            onSelectionSync: onSelectionSync,
+            allowsViewportSelectionSync: allowsViewportSelectionSync,
             onActivate: onActivate,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded,
@@ -78,7 +82,9 @@ struct ClipboardPanelView: View {
             }
         }
         .padding(edgePadding)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .background {
+            panelBackground
+        }
         .shadow(color: .black.opacity(0.30), radius: 28, y: 4)
         .background {
             GeometryReader { proxy in
@@ -112,6 +118,27 @@ struct ClipboardPanelView: View {
             if isExpanded {
                 focusSearchFieldAndMoveCursorToEnd()
             }
+        }
+        .onChange(of: store.searchFieldFocusRevision) { _, _ in
+            if store.shouldFocusSearchField {
+                focusSearchFieldAndMoveCursorToEnd()
+            } else {
+                clearSearchFocus()
+            }
+        }
+    }
+
+    private var panelBackground: some View {
+        ZStack {
+            VisualEffectBlur(material: .hudWindow, blendingMode: .behindWindow)
+
+            RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
+                .fill(.black.opacity(0.18))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: panelRadius, style: .continuous)
+                .stroke(.white.opacity(0.10), lineWidth: 0.8)
         }
     }
 
@@ -494,6 +521,10 @@ struct ClipboardPanelView: View {
                 clearSearchFocus()
                 store.selectByID(itemID)
             },
+            onSelectionSync: { itemID in
+                store.selectByID(itemID)
+            },
+            allowsViewportSelectionSync: !store.shouldFocusSearchField,
             onActivate: { item in
                 onActivateItem(item)
             },

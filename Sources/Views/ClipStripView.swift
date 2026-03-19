@@ -8,6 +8,7 @@ struct ClipStripBuildContext {
     let filePreviewStore: FilePreviewStore
     let payloadPreviewStore: PayloadPreviewStore
     let onSelect: (Int64) -> Void
+    let onSelectionSync: (Int64) -> Void
     let onActivate: (ClipItem) -> Void
     let onDragChanged: (ClipItem, CGPoint) -> Void
     let onDragEnded: (ClipItem, CGPoint) -> Void
@@ -27,17 +28,17 @@ struct ClipStripView: NSViewRepresentable {
         func contentMatches(_ other: ItemConfiguration) -> Bool {
             item == other.item
                 && commandNumber == other.commandNumber
-                && visualRenderMode == other.visualRenderMode
+                && presentationRenderMode == other.presentationRenderMode
                 && accentColorHex == other.accentColorHex
                 && isTitleEditable == other.isTitleEditable
                 && isDraggingSource == other.isDraggingSource
         }
 
-        private var visualRenderMode: SearchRenderMode {
+        var presentationRenderMode: SearchRenderMode {
             switch renderMode {
-            case .interactiveNavigation:
+            case .interactiveNavigation, .lightweightTyping:
                 return .fullIdle
-            case .lightweightTyping, .fullIdle:
+            case .fullIdle:
                 return renderMode
             }
         }
@@ -50,6 +51,8 @@ struct ClipStripView: NSViewRepresentable {
     let filePreviewStore: FilePreviewStore
     let payloadPreviewStore: PayloadPreviewStore
     let onSelect: (Int64) -> Void
+    let onSelectionSync: (Int64) -> Void
+    let allowsViewportSelectionSync: Bool
     let onActivate: (ClipItem) -> Void
     let onDragChanged: (ClipItem, CGPoint) -> Void
     let onDragEnded: (ClipItem, CGPoint) -> Void
@@ -66,6 +69,8 @@ struct ClipStripView: NSViewRepresentable {
             filePreviewStore: filePreviewStore,
             payloadPreviewStore: payloadPreviewStore,
             onSelect: onSelect,
+            onSelectionSync: onSelectionSync,
+            allowsViewportSelectionSync: allowsViewportSelectionSync,
             onActivate: onActivate,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded,
@@ -84,6 +89,8 @@ struct ClipStripView: NSViewRepresentable {
             filePreviewStore: filePreviewStore,
             payloadPreviewStore: payloadPreviewStore,
             onSelect: onSelect,
+            onSelectionSync: onSelectionSync,
+            allowsViewportSelectionSync: allowsViewportSelectionSync,
             onActivate: onActivate,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded,
@@ -106,6 +113,21 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         let insertions: Set<IndexPath>
     }
 
+    private struct CollectionMutation {
+        struct Move {
+            let from: IndexPath
+            let to: IndexPath
+        }
+
+        let deletions: Set<IndexPath>
+        let insertions: Set<IndexPath>
+        let moves: [Move]
+
+        var isEmpty: Bool {
+            deletions.isEmpty && insertions.isEmpty && moves.isEmpty
+        }
+    }
+
     private let scrollView: NSScrollView
     private let collectionView: NSCollectionView
     private let flowLayout: NSCollectionViewFlowLayout
@@ -114,9 +136,11 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
     private var itemIndexByID: [Int64: Int] = [:]
     private var selectedItemID: Int64?
     private var buildContext: ClipStripBuildContext?
+    private var allowsViewportSelectionSync = true
     private var hasScheduledKeepVisiblePass = false
     private var pendingKeepVisibleItemID: Int64?
     private var hasScheduledPrefetchPass = false
+    private var isPerformingProgrammaticScroll = false
     private var iconObserverToken: UUID?
     private var linkPreviewObserverToken: UUID?
     private var filePreviewObserverToken: UUID?
@@ -126,6 +150,10 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         subsystem: Bundle.main.bundleIdentifier ?? "PasteBin",
         category: "ClipStripPerformance"
     )
+
+    override var isOpaque: Bool {
+        false
+    }
 
     override init(frame frameRect: NSRect) {
         flowLayout = NSCollectionViewFlowLayout()
@@ -138,21 +166,29 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         collectionView = NSCollectionView()
         collectionView.collectionViewLayout = flowLayout
         collectionView.isSelectable = false
+        collectionView.wantsLayer = true
+        collectionView.layer?.backgroundColor = NSColor.clear.cgColor
         collectionView.backgroundColors = [.clear]
         collectionView.register(ClipStripCollectionItem.self, forItemWithIdentifier: Self.itemIdentifier)
 
         scrollView = NSScrollView()
         scrollView.drawsBackground = false
+        scrollView.backgroundColor = .clear
         scrollView.borderType = .noBorder
         scrollView.hasHorizontalScroller = false
         scrollView.hasVerticalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.scrollerStyle = .overlay
+        scrollView.contentView.drawsBackground = false
+        scrollView.contentView.backgroundColor = .clear
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.documentView = collectionView
 
         super.init(frame: frameRect)
+
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
 
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -172,7 +208,7 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             queue: .main
         ) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.schedulePrefetchPass()
+                self?.handleVisibleBoundsChanged()
             }
         }
     }
@@ -224,6 +260,8 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         filePreviewStore: FilePreviewStore,
         payloadPreviewStore: PayloadPreviewStore,
         onSelect: @escaping (Int64) -> Void,
+        onSelectionSync: @escaping (Int64) -> Void,
+        allowsViewportSelectionSync: Bool,
         onActivate: @escaping (ClipItem) -> Void,
         onDragChanged: @escaping (ClipItem, CGPoint) -> Void,
         onDragEnded: @escaping (ClipItem, CGPoint) -> Void,
@@ -245,12 +283,14 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             }
         )
         self.selectedItemID = selectedItemID
+        self.allowsViewportSelectionSync = allowsViewportSelectionSync
         buildContext = ClipStripBuildContext(
             iconStore: iconStore,
             linkPreviewStore: linkPreviewStore,
             filePreviewStore: filePreviewStore,
             payloadPreviewStore: payloadPreviewStore,
             onSelect: onSelect,
+            onSelectionSync: onSelectionSync,
             onActivate: onActivate,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded,
@@ -260,34 +300,24 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         attachObserversIfNeeded()
 
         if idsChanged {
-            if let simpleUpdate = simpleCollectionUpdate(from: previousIDs, to: nextIDs) {
-                collectionView.performBatchUpdates {
-                    if !simpleUpdate.deletions.isEmpty {
-                        collectionView.deleteItems(at: simpleUpdate.deletions)
-                    }
-                    if !simpleUpdate.insertions.isEmpty {
-                        collectionView.insertItems(at: simpleUpdate.insertions)
-                    }
-                } completionHandler: { [weak self] _ in
-                    guard let self else { return }
-                    self.updateCollectionViewFrame()
-                    self.refreshVisibleItems(reason: "idMutation") { _ in true }
-                    self.scheduleKeepVisiblePass(for: self.selectedItemID)
-                    self.schedulePrefetchPass()
-                }
+            if let mutation = collectionMutation(from: previousIDs, to: nextIDs) {
+                performCollectionMutation(
+                    mutation,
+                    animated: shouldAnimateCollectionMutation(from: previousItems, to: items)
+                )
                 return
             }
 
             collectionView.reloadData()
             updateCollectionViewFrame()
-            scheduleKeepVisiblePass(for: selectedItemID)
+            scheduleKeepVisiblePassIfNeeded(for: selectedItemID)
             schedulePrefetchPass()
             return
         }
 
         if contentChanged {
             refreshVisibleItems(reason: "configuration") { _ in true }
-            scheduleKeepVisiblePass(for: selectedItemID)
+            scheduleKeepVisiblePassIfNeeded(for: selectedItemID)
             schedulePrefetchPass()
             return
         }
@@ -361,6 +391,79 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         return SimpleCollectionUpdate(deletions: deletions, insertions: insertions)
     }
 
+    private func collectionMutation(from previousIDs: [Int64], to nextIDs: [Int64]) -> CollectionMutation? {
+        if let simpleUpdate = simpleCollectionUpdate(from: previousIDs, to: nextIDs) {
+            return CollectionMutation(
+                deletions: simpleUpdate.deletions,
+                insertions: simpleUpdate.insertions,
+                moves: []
+            )
+        }
+
+        let diff = nextIDs.difference(from: previousIDs)
+        var deletions = Set<IndexPath>()
+        var insertions = Set<IndexPath>()
+        var moves: [CollectionMutation.Move] = []
+
+        for change in diff {
+            switch change {
+            case .remove(let offset, _, let associatedWith):
+                if let associatedWith {
+                    moves.append(
+                        CollectionMutation.Move(
+                            from: IndexPath(item: offset, section: 0),
+                            to: IndexPath(item: associatedWith, section: 0)
+                        )
+                    )
+                } else {
+                    deletions.insert(IndexPath(item: offset, section: 0))
+                }
+            case .insert(let offset, _, let associatedWith):
+                guard associatedWith == nil else { continue }
+                insertions.insert(IndexPath(item: offset, section: 0))
+            }
+        }
+
+        let mutation = CollectionMutation(
+            deletions: deletions,
+            insertions: insertions,
+            moves: moves
+        )
+        return mutation.isEmpty ? nil : mutation
+    }
+
+    private func performCollectionMutation(_ mutation: CollectionMutation, animated: Bool) {
+        let applyUpdates = { [self] in
+            collectionView.performBatchUpdates {
+                if !mutation.deletions.isEmpty {
+                    collectionView.deleteItems(at: mutation.deletions)
+                }
+                for move in mutation.moves {
+                    collectionView.moveItem(at: move.from, to: move.to)
+                }
+                if !mutation.insertions.isEmpty {
+                    collectionView.insertItems(at: mutation.insertions)
+                }
+            } completionHandler: { [weak self] _ in
+                guard let self else { return }
+                self.updateCollectionViewFrame()
+                self.refreshVisibleItems(reason: "idMutation") { _ in true }
+                self.scheduleKeepVisiblePassIfNeeded(for: self.selectedItemID)
+                self.schedulePrefetchPass()
+            }
+        }
+
+        guard !animated else {
+            applyUpdates()
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            applyUpdates()
+        }
+    }
+
     private func updateSelection(from previousID: Int64?, to nextID: Int64?) {
         if let previousID, let previousIndex = indexOfItem(withID: previousID) {
             updateSelectionForVisibleItem(at: previousIndex, isSelected: false)
@@ -421,6 +524,17 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         itemIndexByID[id]
     }
 
+    private func shouldAnimateCollectionMutation(
+        from previousItems: [ClipStripView.ItemConfiguration],
+        to nextItems: [ClipStripView.ItemConfiguration]
+    ) -> Bool {
+        !usesTypingSearchPresentation(previousItems) && !usesTypingSearchPresentation(nextItems)
+    }
+
+    private func usesTypingSearchPresentation(_ items: [ClipStripView.ItemConfiguration]) -> Bool {
+        items.contains(where: { $0.renderMode == .lightweightTyping })
+    }
+
     private func scheduleKeepVisiblePass(for itemID: Int64?) {
         pendingKeepVisibleItemID = itemID
         guard !hasScheduledKeepVisiblePass else { return }
@@ -433,11 +547,33 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         }
     }
 
+    private func scheduleKeepVisiblePassIfNeeded(for itemID: Int64?) {
+        guard let itemID else { return }
+        guard let index = indexOfItem(withID: itemID) else { return }
+        guard let clipView = scrollView.contentView as NSClipView? else {
+            scheduleKeepVisiblePass(for: itemID)
+            return
+        }
+
+        let visibleBounds = clipView.bounds
+        let itemFrame = frameForItem(at: index)
+        let desiredMinX = itemFrame.minX - Self.keepVisiblePadding
+        let desiredMaxX = itemFrame.maxX + Self.keepVisiblePadding
+        let isWithinVisibleBand = desiredMinX >= visibleBounds.minX && desiredMaxX <= visibleBounds.maxX
+        guard !isWithinVisibleBand else { return }
+        scheduleKeepVisiblePass(for: itemID)
+    }
+
     private func flushKeepVisiblePass() {
         guard let itemID = pendingKeepVisibleItemID else { return }
         pendingKeepVisibleItemID = nil
         updateCollectionViewFrame()
         ensureItemVisible(id: itemID)
+    }
+
+    private func handleVisibleBoundsChanged() {
+        schedulePrefetchPass()
+        syncSelectionToVisibleViewportIfNeeded()
     }
 
     private func ensureItemVisible(id: Int64) {
@@ -461,8 +597,12 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         let documentWidth = max(collectionView.bounds.width, visibleBounds.width)
         let maxOriginX = max(0, documentWidth - visibleBounds.width)
         nextOrigin.x = min(max(0, nextOrigin.x), maxOriginX)
+        isPerformingProgrammaticScroll = true
         clipView.scroll(to: nextOrigin)
         scrollView.reflectScrolledClipView(clipView)
+        DispatchQueue.main.async { [weak self] in
+            self?.isPerformingProgrammaticScroll = false
+        }
     }
 
     private func updateCollectionViewFrame() {
@@ -504,6 +644,46 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         )
     }
 
+    private func syncSelectionToVisibleViewportIfNeeded() {
+        guard !isPerformingProgrammaticScroll else { return }
+        guard allowsViewportSelectionSync else { return }
+        guard let buildContext else { return }
+        guard !items.isEmpty else { return }
+        guard let clipView = scrollView.contentView as NSClipView? else { return }
+
+        let visibleBounds = clipView.bounds
+        if let selectedItemID,
+           let selectedIndex = indexOfItem(withID: selectedItemID),
+           frameForItem(at: selectedIndex).intersects(visibleBounds) {
+            return
+        }
+
+        guard let targetIndex = preferredViewportSelectionIndex(visibleBounds: visibleBounds) else {
+            return
+        }
+
+        let targetItemID = items[targetIndex].item.id
+        guard targetItemID != selectedItemID else { return }
+        buildContext.onSelectionSync(targetItemID)
+    }
+
+    private func preferredViewportSelectionIndex(visibleBounds: CGRect) -> Int? {
+        let visibleIndexes = collectionView.indexPathsForVisibleItems()
+            .map(\.item)
+            .filter { items.indices.contains($0) }
+        guard !visibleIndexes.isEmpty else { return nil }
+
+        let viewportMidX = visibleBounds.midX
+        return visibleIndexes.min { lhs, rhs in
+            let lhsDistance = abs(frameForItem(at: lhs).midX - viewportMidX)
+            let rhsDistance = abs(frameForItem(at: rhs).midX - viewportMidX)
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+            return lhs < rhs
+        }
+    }
+
     private func attachObserversIfNeeded() {
         guard let buildContext else { return }
 
@@ -511,6 +691,7 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             iconObserverToken = buildContext.iconStore.addIconObserver { [weak self] bundleID in
                 self?.refreshVisibleItems(reason: "icon") { configuration in
                     configuration.item.sourceBundleID == bundleID
+                        && self?.shouldRefreshVisibleAsset(for: configuration) == true
                 }
             }
         }
@@ -519,6 +700,7 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             linkPreviewObserverToken = buildContext.linkPreviewStore.addChangeObserver { [weak self] url in
                 self?.refreshVisibleItems(reason: "linkPreview") { configuration in
                     configuration.item.linkURL == url
+                        && self?.shouldRefreshVisibleAsset(for: configuration) == true
                 }
             }
         }
@@ -527,6 +709,7 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             filePreviewObserverToken = buildContext.filePreviewStore.addChangeObserver { [weak self] path in
                 self?.refreshVisibleItems(reason: "filePreview") { configuration in
                     configuration.item.filePaths.first == path
+                        && self?.shouldRefreshVisibleAsset(for: configuration) == true
                 }
             }
         }
@@ -535,9 +718,22 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             payloadPreviewObserverToken = buildContext.payloadPreviewStore.addChangeObserver { [weak self] itemID in
                 self?.refreshVisibleItems(reason: "payloadPreview") { configuration in
                     configuration.item.id == itemID
+                        && self?.shouldRefreshVisibleAsset(for: configuration) == true
                 }
             }
         }
+    }
+
+    private func shouldRefreshVisibleAsset(for configuration: ClipStripView.ItemConfiguration) -> Bool {
+        guard configuration.renderMode != .lightweightTyping else {
+            return false
+        }
+
+        if configuration.item.id == selectedItemID {
+            return true
+        }
+
+        return configuration.renderMode == .fullIdle
     }
 
     private func schedulePrefetchPass() {
@@ -553,7 +749,7 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
 
     private func flushPrefetchPass() {
         guard let buildContext else { return }
-        let indexes = prefetchIndexes()
+        let indexes = prioritizedPrefetchIndexes(prefetchIndexes())
         guard !indexes.isEmpty else { return }
 
         let signpostID = OSSignpostID(log: performanceLog)
@@ -570,19 +766,20 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
             let configuration = items[index]
             _ = buildContext.iconStore.icon(for: configuration.item)
 
-            guard configuration.renderMode == .fullIdle else { continue }
+            let allowsImmediatePreviewLoading = configuration.renderMode != .lightweightTyping
+            let allowsDeferredAssetLoading = configuration.renderMode == .fullIdle
             switch configuration.item.contentType {
-            case .link:
+            case .link where allowsImmediatePreviewLoading:
                 if let url = configuration.item.linkURL {
                     buildContext.linkPreviewStore.loadPreview(for: url)
                 }
-            case .fileList:
+            case .fileList where allowsDeferredAssetLoading:
                 if let path = configuration.item.filePaths.first {
                     buildContext.filePreviewStore.loadPreview(for: path)
                 }
-            case .image where configuration.item.hasPayloadData:
+            case .image where configuration.item.hasPayloadData && allowsDeferredAssetLoading:
                 buildContext.payloadPreviewStore.loadIfNeeded(for: configuration.item.id)
-            case .richText where configuration.item.hasRTFData || configuration.item.hasHTMLContent:
+            case .richText where (configuration.item.hasRTFData || configuration.item.hasHTMLContent) && allowsDeferredAssetLoading:
                 buildContext.payloadPreviewStore.loadIfNeeded(for: configuration.item.id)
             default:
                 break
@@ -625,6 +822,21 @@ final class ClipStripContainerView: NSView, NSCollectionViewDataSource, NSCollec
         return indexes.sorted()
     }
 
+    private func prioritizedPrefetchIndexes(_ indexes: [Int]) -> [Int] {
+        guard let selectedItemID, let selectedIndex = indexOfItem(withID: selectedItemID) else {
+            return indexes
+        }
+
+        return indexes.sorted { lhs, rhs in
+            let lhsDistance = abs(lhs - selectedIndex)
+            let rhsDistance = abs(rhs - selectedIndex)
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+            return lhs < rhs
+        }
+    }
+
     private func refreshVisibleItems(
         reason: StaticString,
         matching predicate: (ClipStripView.ItemConfiguration) -> Bool
@@ -654,7 +866,10 @@ private final class FastTextClipCardView: NSView {
         case snippet
     }
 
+    private let shadowView = NSView()
+    private let cardSurfaceView = NSView()
     private let headerView = NSView()
+    private let headerDivider = NSView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let timeLabel = NSTextField(labelWithString: "")
     private let iconView = NSImageView()
@@ -713,18 +928,30 @@ private final class FastTextClipCardView: NSView {
         super.init(frame: frameRect)
 
         wantsLayer = true
-        layer?.cornerRadius = 14
-        layer?.backgroundColor = NSColor(white: 0.11, alpha: 1.0).cgColor
-        layer?.borderWidth = 0.5
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.06).cgColor
-        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+
+        shadowView.wantsLayer = true
+        shadowView.layer?.shadowColor = NSColor.black.cgColor
+        shadowView.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        shadowView.layer?.shadowRadius = 8
+        shadowView.layer?.shadowOpacity = 0.16
+
+        cardSurfaceView.wantsLayer = true
+        cardSurfaceView.layer?.cornerRadius = 14
+        cardSurfaceView.layer?.backgroundColor = NSColor(white: 0.11, alpha: 1.0).cgColor
+        cardSurfaceView.layer?.borderWidth = 0.5
+        cardSurfaceView.layer?.borderColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        cardSurfaceView.layer?.masksToBounds = true
 
         headerView.wantsLayer = true
+        headerDivider.wantsLayer = true
+        headerDivider.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.20).cgColor
         textContainer.wantsLayer = true
-        textContainer.layer?.cornerRadius = 8
-        textContainer.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
-        textContainer.layer?.borderWidth = 0.7
-        textContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        textContainer.layer?.cornerRadius = 12
+        textContainer.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.045).cgColor
+        textContainer.layer?.borderWidth = 0.8
+        textContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        textContainer.layer?.masksToBounds = true
         commandBadgeBackground.wantsLayer = true
         commandBadgeBackground.layer?.cornerRadius = 9
         commandBadgeBackground.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
@@ -754,24 +981,46 @@ private final class FastTextClipCardView: NSView {
 
         iconView.imageScaling = .scaleProportionallyUpOrDown
 
-        for subview in [headerView, textContainer, footerLabel, commandBadgeBackground] {
+        for subview in [shadowView, cardSurfaceView] {
             addSubview(subview)
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
+
+        for subview in [headerView, headerDivider, textContainer, footerLabel, commandBadgeBackground] {
+            cardSurfaceView.addSubview(subview)
+            subview.translatesAutoresizingMaskIntoConstraints = false
+        }
+
         for subview in [titleLabel, timeLabel, iconView] {
             headerView.addSubview(subview)
             subview.translatesAutoresizingMaskIntoConstraints = false
         }
+
         textContainer.addSubview(bodyLabel)
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
         commandBadgeBackground.addSubview(commandBadgeLabel)
         commandBadgeLabel.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            headerView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            headerView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            headerView.topAnchor.constraint(equalTo: topAnchor),
+            shadowView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            shadowView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shadowView.topAnchor.constraint(equalTo: topAnchor),
+            shadowView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            cardSurfaceView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            cardSurfaceView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            cardSurfaceView.topAnchor.constraint(equalTo: topAnchor),
+            cardSurfaceView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            headerView.leadingAnchor.constraint(equalTo: cardSurfaceView.leadingAnchor),
+            headerView.trailingAnchor.constraint(equalTo: cardSurfaceView.trailingAnchor),
+            headerView.topAnchor.constraint(equalTo: cardSurfaceView.topAnchor),
             headerView.heightAnchor.constraint(equalToConstant: 64),
+
+            headerDivider.leadingAnchor.constraint(equalTo: headerView.leadingAnchor),
+            headerDivider.trailingAnchor.constraint(equalTo: headerView.trailingAnchor),
+            headerDivider.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
+            headerDivider.heightAnchor.constraint(equalToConstant: 1),
 
             titleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 14),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: iconView.leadingAnchor, constant: -8),
@@ -786,20 +1035,22 @@ private final class FastTextClipCardView: NSView {
             iconView.widthAnchor.constraint(equalToConstant: 46),
             iconView.heightAnchor.constraint(equalToConstant: 46),
 
-            textContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            textContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            textContainer.leadingAnchor.constraint(equalTo: cardSurfaceView.leadingAnchor, constant: 14),
+            textContainer.trailingAnchor.constraint(equalTo: cardSurfaceView.trailingAnchor, constant: -14),
             textContainer.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 12),
 
             bodyLabel.leadingAnchor.constraint(equalTo: textContainer.leadingAnchor, constant: 9),
             bodyLabel.trailingAnchor.constraint(equalTo: textContainer.trailingAnchor, constant: -9),
-            bodyLabel.topAnchor.constraint(equalTo: textContainer.topAnchor, constant: 8),
-            bodyLabel.bottomAnchor.constraint(equalTo: textContainer.bottomAnchor, constant: -8),
+            bodyLabel.topAnchor.constraint(equalTo: textContainer.topAnchor, constant: 10),
+            bodyLabel.bottomAnchor.constraint(equalTo: textContainer.bottomAnchor, constant: -10),
 
-            footerLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            footerLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
+            textContainer.bottomAnchor.constraint(lessThanOrEqualTo: footerLabel.topAnchor, constant: -12),
+
+            footerLabel.leadingAnchor.constraint(equalTo: cardSurfaceView.leadingAnchor, constant: 14),
+            footerLabel.bottomAnchor.constraint(equalTo: cardSurfaceView.bottomAnchor, constant: -14),
             footerLabel.trailingAnchor.constraint(lessThanOrEqualTo: commandBadgeBackground.leadingAnchor, constant: -8),
 
-            commandBadgeBackground.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            commandBadgeBackground.trailingAnchor.constraint(equalTo: cardSurfaceView.trailingAnchor, constant: -14),
             commandBadgeBackground.centerYAnchor.constraint(equalTo: footerLabel.centerYAnchor),
             commandBadgeLabel.leadingAnchor.constraint(equalTo: commandBadgeBackground.leadingAnchor, constant: 6),
             commandBadgeLabel.trailingAnchor.constraint(equalTo: commandBadgeBackground.trailingAnchor, constant: -6),
@@ -811,6 +1062,17 @@ private final class FastTextClipCardView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+
+        shadowView.layer?.shadowPath = CGPath(
+            roundedRect: bounds.insetBy(dx: 1, dy: 1),
+            cornerWidth: 14,
+            cornerHeight: 14,
+            transform: nil
+        )
     }
 
     func apply(
@@ -870,11 +1132,12 @@ private final class FastTextClipCardView: NSView {
             bodyLabel.font = .systemFont(ofSize: 13.5, weight: .regular)
             textContainer.layer?.backgroundColor = NSColor.clear.cgColor
             textContainer.layer?.borderWidth = 0
+            textContainer.layer?.borderColor = NSColor.clear.cgColor
         case .snippet:
             bodyLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
-            textContainer.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
-            textContainer.layer?.borderWidth = 0.7
-            textContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            textContainer.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
+            textContainer.layer?.borderWidth = 0.85
+            textContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
         }
 
         if let commandNumber {
@@ -890,14 +1153,13 @@ private final class FastTextClipCardView: NSView {
 
     func updateSelectionState(isSelected: Bool, isDraggingSource: Bool) {
         alphaValue = isDraggingSource ? 0.34 : 1.0
-        layer?.borderWidth = isSelected ? 2.5 : 0.5
-        layer?.borderColor = (isSelected
+        cardSurfaceView.layer?.borderWidth = isSelected ? 2.5 : 0.5
+        cardSurfaceView.layer?.borderColor = (isSelected
             ? NSColor(calibratedRed: 0.35, green: 0.55, blue: 1.0, alpha: 0.80)
             : NSColor.white.withAlphaComponent(0.06)).cgColor
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = isSelected ? 0.32 : 0.20
-        layer?.shadowRadius = isSelected ? 10 : 6
-        layer?.shadowOffset = CGSize(width: 0, height: -2)
+        shadowView.layer?.shadowOpacity = isSelected ? 0.22 : 0.12
+        shadowView.layer?.shadowRadius = isSelected ? 14 : 8
+        shadowView.layer?.shadowOffset = CGSize(width: 0, height: -2)
     }
 
     private func effectiveAccentColorHex(_ accentColorHex: String?, item: ClipItem) -> NSColor {
@@ -1024,6 +1286,7 @@ final class ClipStripCollectionItem: NSCollectionViewItem {
     override func loadView() {
         let view = NSView()
         view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
         self.view = view
     }
 
@@ -1055,7 +1318,7 @@ final class ClipStripCollectionItem: NSCollectionViewItem {
                 item: configuration.item,
                 commandNumber: configuration.commandNumber,
                 icon: icon,
-                renderMode: configuration.renderMode,
+                renderMode: configuration.presentationRenderMode,
                 accentColorHex: configuration.accentColorHex,
                 isSelected: isSelected,
                 isDraggingSource: configuration.isDraggingSource
@@ -1072,7 +1335,7 @@ final class ClipStripCollectionItem: NSCollectionViewItem {
             isSelected: isSelected,
             commandNumber: configuration.commandNumber,
             icon: icon,
-            renderMode: configuration.renderMode,
+            renderMode: configuration.presentationRenderMode,
             accentColorOverride: configuration.accentColorHex.map(Color.init(hex:)),
             isTitleEditable: configuration.isTitleEditable,
             onTitleChange: { title in
