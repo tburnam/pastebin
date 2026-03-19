@@ -87,18 +87,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func copyToPasteboard(_ item: ClipItem) {
         monitor?.suppressNextCapture()
 
+        guard let content = store?.fetchContentForPaste(itemID: item.id) else {
+            // Fallback: write what we have from the snippet
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            _ = pasteboard.setString(item.snippetPreview, forType: .string)
+            return
+        }
+
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        write(item: item, to: pasteboard)
+        write(item: item, content: content, to: pasteboard)
 
         // Promote the selected history item to most-recent without creating duplicates.
-        store?.insert(captured: CapturedClipboardItem(item: item))
+        store?.promoteItem(id: item.id)
     }
 
-    private func write(item: ClipItem, to pasteboard: NSPasteboard) {
+    private func write(item: ClipItem, content: PasteContent, to pasteboard: NSPasteboard) {
         switch item.contentType {
         case .image:
-            if let payloadData = item.payloadData {
+            if let payloadData = content.payloadData {
                 if pasteboard.setData(payloadData, forType: .tiff) {
                     return
                 }
@@ -121,16 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .richText:
             var wroteAny = false
 
-            if let rtfData = item.rtfData {
+            if let rtfData = content.rtfData {
                 wroteAny = pasteboard.setData(rtfData, forType: .rtf) || wroteAny
             }
 
-            if let htmlContent = item.htmlContent {
+            if let htmlContent = content.htmlContent {
                 wroteAny = pasteboard.setString(htmlContent, forType: .html) || wroteAny
             }
 
-            if !item.content.isEmpty {
-                wroteAny = pasteboard.setString(item.content, forType: .string) || wroteAny
+            if !content.text.isEmpty {
+                wroteAny = pasteboard.setString(content.text, forType: .string) || wroteAny
             }
 
             if wroteAny {
@@ -140,8 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .link:
             if let linkURL = item.linkURL {
                 _ = pasteboard.writeObjects([linkURL as NSURL])
-                if !item.content.isEmpty {
-                    _ = pasteboard.setString(item.content, forType: .string)
+                if !content.text.isEmpty {
+                    _ = pasteboard.setString(content.text, forType: .string)
                 }
                 return
             }
@@ -150,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             break
         }
 
-        _ = pasteboard.setString(item.content, forType: .string)
+        _ = pasteboard.setString(content.text, forType: .string)
     }
 
     private func setupStatusItem() {

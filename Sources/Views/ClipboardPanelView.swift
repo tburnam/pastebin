@@ -1,6 +1,38 @@
 import AppKit
 import SwiftUI
 
+private struct ClipStripSection: View {
+    let configurations: [ClipStripView.ItemConfiguration]
+    @ObservedObject var selectionState: ClipSelectionState
+    let iconStore: ClipboardStore
+    let linkPreviewStore: LinkPreviewStore
+    let filePreviewStore: FilePreviewStore
+    let payloadPreviewStore: PayloadPreviewStore
+    let onSelect: (Int64) -> Void
+    let onActivate: (ClipItem) -> Void
+    let onDragChanged: (ClipItem, CGPoint) -> Void
+    let onDragEnded: (ClipItem, CGPoint) -> Void
+    let onTitleChange: (Int64, String?) -> Void
+    let onTitleEditingStateChange: (Bool) -> Void
+
+    var body: some View {
+        ClipStripView(
+            items: configurations,
+            selectedItemID: selectionState.selectedItemID,
+            iconStore: iconStore,
+            linkPreviewStore: linkPreviewStore,
+            filePreviewStore: filePreviewStore,
+            payloadPreviewStore: payloadPreviewStore,
+            onSelect: onSelect,
+            onActivate: onActivate,
+            onDragChanged: onDragChanged,
+            onDragEnded: onDragEnded,
+            onTitleChange: onTitleChange,
+            onTitleEditingStateChange: onTitleEditingStateChange
+        )
+    }
+}
+
 struct ClipboardPanelView: View {
     private enum ShortcutKey: Hashable {
         case symbol(String)
@@ -9,7 +41,7 @@ struct ClipboardPanelView: View {
     }
 
     @ObservedObject var store: ClipboardStore
-    let onActivateItem: (Int) -> Void
+    let onActivateItem: (ClipItem) -> Void
 
     @FocusState private var isSearchFocused: Bool
     @StateObject private var linkPreviewStore = LinkPreviewStore()
@@ -21,13 +53,13 @@ struct ClipboardPanelView: View {
     @State private var bucketFrames: [Int64: CGRect] = [:]
     @State private var bucketStripContentWidth: CGFloat = 0
     @State private var shortcutHintsWidth: CGFloat = 0
+    @State private var panelGlobalFrame: CGRect = .zero
 
     private let panelRadius: CGFloat = 22
     private let edgePadding: CGFloat = 14
     private let topControlHeight: CGFloat = 38
     private let chipVisualHeight: CGFloat = 29
     private let searchToggleDiameter: CGFloat = 29
-    private let dragCoordinateSpaceName = "clipboard-panel-drag-space"
     private let searchPillWidth: CGFloat = 236
 
     var body: some View {
@@ -48,12 +80,24 @@ struct ClipboardPanelView: View {
         .padding(edgePadding)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: panelRadius, style: .continuous))
         .shadow(color: .black.opacity(0.30), radius: 28, y: 4)
-        .coordinateSpace(name: dragCoordinateSpaceName)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: PanelFramePreferenceKey.self,
+                    value: proxy.frame(in: .global)
+                )
+            }
+        }
         .overlay(alignment: .topLeading) {
             if let activeCardDrag {
                 dragPreview(title: activeCardDrag.title)
-                    .position(activeCardDrag.location)
+                    .position(dragPreviewPosition(for: activeCardDrag))
                     .allowsHitTesting(false)
+            }
+        }
+        .onPreferenceChange(PanelFramePreferenceKey.self) { frame in
+            if panelGlobalFrame != frame {
+                panelGlobalFrame = frame
             }
         }
         .onPreferenceChange(BucketChipFramePreferenceKey.self) { frames in
@@ -226,7 +270,7 @@ struct ClipboardPanelView: View {
                     GeometryReader { proxy in
                         Color.clear.preference(
                             key: BucketChipFramePreferenceKey.self,
-                            value: [bucket.id: proxy.frame(in: .named(dragCoordinateSpaceName))]
+                            value: [bucket.id: proxy.frame(in: .global)]
                         )
                     }
                 }
@@ -406,6 +450,11 @@ struct ClipboardPanelView: View {
         }
     }
 
+    private func clearSearchFocus() {
+        isSearchFocused = false
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
     private func placeSearchCursorAtEnd() {
         guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
         let location = editor.string.utf16.count
@@ -413,62 +462,54 @@ struct ClipboardPanelView: View {
     }
 
     private func cardsView(filtered: [ClipItem]) -> some View {
-        let enumeratedItems = Array(filtered.enumerated())
-        let selectedItemID = store.selectedItem()?.id
-        let activeBucketAccentColor = store.activeBucket.map { Color(hex: $0.colorHex) }
+        let activeBucketAccentColorHex = store.activeBucket?.colorHex
         let isBucketScope = !store.isShowingClipboard
-
-        return ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 14) {
-                    ForEach(enumeratedItems, id: \.element.id) { entry in
-                        let index = entry.offset
-                        let item = entry.element
-                        let clipboardScopeAccentColor = droppedBucketColorByClipID[item.id].map(Color.init(hex:))
-
-                        ClipCardView(
-                            item: item,
-                            isSelected: selectedItemID == item.id,
-                            commandNumber: index < 9 ? index + 1 : nil,
-                            icon: store.icon(for: item),
-                            accentColorOverride: isBucketScope ? activeBucketAccentColor : clipboardScopeAccentColor,
-                            isTitleEditable: isBucketScope,
-                            onTitleChange: { title in
-                                store.updateTitleOverrideForSelectedBucket(clipItemID: item.id, title: title)
-                            },
-                            onTitleEditingStateChange: { isEditing in
-                                store.setInlineTitleEditorActive(isEditing)
-                            },
-                            linkPreviewStore: linkPreviewStore,
-                            filePreviewStore: filePreviewStore
-                        )
-                        .id(item.id)
-                        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .onLongPressGesture(
-                            minimumDuration: 0,
-                            maximumDistance: 20,
-                            pressing: { isPressing in
-                                guard isPressing else { return }
-                                store.select(index)
-                            },
-                            perform: {}
-                        )
-                        .onTapGesture(count: 2) {
-                            onActivateItem(index)
-                        }
-                        .opacity(activeCardDrag?.clipItemID == item.id ? 0.34 : 1.0)
-                        .simultaneousGesture(cardDragGesture(for: item))
-                    }
-                }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
+        let commandNumberByID: [Int64: Int] = {
+            var map = [Int64: Int](minimumCapacity: 9)
+            for (i, item) in filtered.prefix(9).enumerated() {
+                map[item.id] = i + 1
             }
-            .onChange(of: store.selectedIndex) { _, newValue in
-                if filtered.indices.contains(newValue) {
-                    proxy.scrollTo(filtered[newValue].id)
-                }
-            }
+            return map
+        }()
+
+        let configurations = filtered.map { item in
+            ClipStripView.ItemConfiguration(
+                item: item,
+                commandNumber: commandNumberByID[item.id],
+                renderMode: store.searchRenderMode,
+                accentColorHex: isBucketScope ? activeBucketAccentColorHex : droppedBucketColorByClipID[item.id],
+                isTitleEditable: isBucketScope,
+                isDraggingSource: activeCardDrag?.clipItemID == item.id
+            )
         }
+
+        return ClipStripSection(
+            configurations: configurations,
+            selectionState: store.selectionState,
+            iconStore: store,
+            linkPreviewStore: linkPreviewStore,
+            filePreviewStore: filePreviewStore,
+            payloadPreviewStore: store.payloadStore,
+            onSelect: { itemID in
+                clearSearchFocus()
+                store.selectByID(itemID)
+            },
+            onActivate: { item in
+                onActivateItem(item)
+            },
+            onDragChanged: { item, location in
+                updateCardDrag(for: item, globalLocation: location)
+            },
+            onDragEnded: { item, location in
+                finishCardDrag(for: item, globalLocation: location)
+            },
+            onTitleChange: { itemID, title in
+                store.updateTitleOverrideForSelectedBucket(clipItemID: itemID, title: title)
+            },
+            onTitleEditingStateChange: { isEditing in
+                store.setInlineTitleEditorActive(isEditing)
+            }
+        )
     }
 
     // MARK: - States
@@ -536,38 +577,28 @@ struct ClipboardPanelView: View {
         return true
     }
 
-    private func cardDragGesture(for item: ClipItem) -> some Gesture {
-        DragGesture(minimumDistance: 2, coordinateSpace: .named(dragCoordinateSpaceName))
-            .onChanged { value in
-                updateCardDrag(for: item, location: value.location)
-            }
-            .onEnded { value in
-                finishCardDrag(for: item, location: value.location)
-            }
-    }
-
-    private func updateCardDrag(for item: ClipItem, location: CGPoint) {
+    private func updateCardDrag(for item: ClipItem, globalLocation: CGPoint) {
         if activeCardDrag?.clipItemID == item.id {
-            activeCardDrag?.location = location
+            activeCardDrag?.globalLocation = globalLocation
         } else {
             activeCardDrag = ActiveCardDrag(
                 clipItemID: item.id,
                 title: item.displayTitle,
-                location: location
+                globalLocation: globalLocation
             )
         }
 
-        hoveredBucketID = bucketID(at: location)
+        hoveredBucketID = bucketID(at: globalLocation)
     }
 
-    private func finishCardDrag(for item: ClipItem, location: CGPoint) {
+    private func finishCardDrag(for item: ClipItem, globalLocation: CGPoint) {
         guard activeCardDrag?.clipItemID == item.id else {
             activeCardDrag = nil
             hoveredBucketID = nil
             return
         }
 
-        let destinationBucketID = bucketID(at: location)
+        let destinationBucketID = bucketID(at: globalLocation)
 
         activeCardDrag = nil
         hoveredBucketID = nil
@@ -586,6 +617,13 @@ struct ClipboardPanelView: View {
 
     private func bucketID(at location: CGPoint) -> Int64? {
         bucketFrames.first(where: { $0.value.contains(location) })?.key
+    }
+
+    private func dragPreviewPosition(for activeCardDrag: ActiveCardDrag) -> CGPoint {
+        CGPoint(
+            x: activeCardDrag.globalLocation.x - panelGlobalFrame.minX,
+            y: activeCardDrag.globalLocation.y - panelGlobalFrame.minY
+        )
     }
 
     private func playBucketDropPulse(bucketID: Int64) {
@@ -968,7 +1006,15 @@ private extension View {
 private struct ActiveCardDrag {
     let clipItemID: Int64
     let title: String
-    var location: CGPoint
+    var globalLocation: CGPoint
+}
+
+private struct PanelFramePreferenceKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
 }
 
 private struct BucketChipFramePreferenceKey: PreferenceKey {
@@ -995,7 +1041,7 @@ private struct BucketStripContentWidthPreferenceKey: PreferenceKey {
     }
 }
 
-private extension Color {
+extension Color {
     init(hex: String) {
         let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         var hexString = normalized

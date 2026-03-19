@@ -48,25 +48,6 @@ struct CapturedClipboardItem {
         self.sourceAppName = sourceAppName
     }
 
-    init(item: ClipItem) {
-        self.init(
-            content: item.content,
-            contentTypeRaw: item.contentType.storageValue,
-            linkURL: item.linkURL?.absoluteString,
-            codeLanguage: item.codeLanguage,
-            structuredFormatRaw: item.structuredFormat?.rawValue,
-            filePaths: item.filePaths,
-            imageWidth: item.imageWidth,
-            imageHeight: item.imageHeight,
-            payloadData: item.payloadData,
-            rtfData: item.rtfData,
-            htmlContent: item.htmlContent,
-            dedupeKey: item.dedupeKey,
-            sourceBundleID: item.sourceBundleID,
-            sourceAppName: item.sourceAppName
-        )
-    }
-
     func withSource(bundleID: String?, appName: String?) -> CapturedClipboardItem {
         CapturedClipboardItem(
             content: content,

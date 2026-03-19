@@ -130,8 +130,8 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         panel.isMovableByWindowBackground = false
         panel.delegate = self
 
-        let rootView = ClipboardPanelView(store: store) { [weak self] index in
-            self?.activateItem(at: index)
+        let rootView = ClipboardPanelView(store: store) { [weak self] item in
+            self?.activateItem(item)
         }
 
         panel.contentView = NSHostingView(rootView: rootView)
@@ -195,7 +195,11 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
 
         // Cmd+1-9: jump to item, copy, and close
         if event.modifierFlags.contains(.command), let index = commandIndex(for: event.keyCode) {
-            activateItem(at: index)
+            guard let item = store.item(at: index) else {
+                NSSound.beep()
+                return true
+            }
+            activateItem(item)
             return true
         }
 
@@ -262,13 +266,7 @@ final class ClipboardPanelController: NSObject, NSWindowDelegate {
         close()
     }
 
-    private func activateItem(at index: Int) {
-        guard let item = store.item(at: index) else {
-            NSSound.beep()
-            return
-        }
-
-        store.select(index)
+    private func activateItem(_ item: ClipItem) {
         onSelect(item)
         close()
     }

@@ -10,7 +10,7 @@ final class FilePreviewStore: ObservableObject {
         return cache
     }()
     private var inFlightPaths: Set<String> = []
-    private var hasScheduledChangeNotification = false
+    private var changeObservers: [UUID: (String) -> Void] = [:]
 
     func preview(for path: String) -> NSImage? {
         cachedImages.object(forKey: path as NSString)
@@ -27,7 +27,7 @@ final class FilePreviewStore: ObservableObject {
         // Decode images off the main thread to avoid frame drops on large files.
         let pathCopy = path
         Task.detached(priority: .userInitiated) { [weak self] in
-            if let directImage = NSImage(contentsOfFile: pathCopy) {
+            if let directImage = PreviewImageDecoder.previewImage(fromFileAt: pathCopy) {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.cacheImage(directImage, for: pathCopy)
@@ -41,6 +41,17 @@ final class FilePreviewStore: ObservableObject {
                 self.generateThumbnail(for: pathCopy)
             }
         }
+    }
+
+    @discardableResult
+    func addChangeObserver(_ observer: @escaping (String) -> Void) -> UUID {
+        let token = UUID()
+        changeObservers[token] = observer
+        return token
+    }
+
+    func removeChangeObserver(_ token: UUID) {
+        changeObservers[token] = nil
     }
 
     private func generateThumbnail(for path: String) {
@@ -64,17 +75,8 @@ final class FilePreviewStore: ObservableObject {
 
     private func cacheImage(_ image: NSImage, for path: String) {
         cachedImages.setObject(image, forKey: path as NSString)
-        scheduleChangeNotification()
-    }
-
-    private func scheduleChangeNotification() {
-        guard !hasScheduledChangeNotification else { return }
-        hasScheduledChangeNotification = true
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.hasScheduledChangeNotification = false
-            self.objectWillChange.send()
+        for observer in changeObservers.values {
+            observer(path)
         }
     }
 }

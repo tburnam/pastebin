@@ -2,6 +2,211 @@ import AppKit
 import Foundation
 import os.signpost
 
+enum SearchRenderMode: String, Equatable {
+    case lightweightTyping
+    case interactiveNavigation
+    case fullIdle
+}
+
+private final class CachedExtendedSearchText: NSObject {
+    let normalizedUTF8: ContiguousArray<UInt8>
+    let fingerprint: SearchFingerprint
+
+    init(normalizedUTF8: ContiguousArray<UInt8>) {
+        self.normalizedUTF8 = normalizedUTF8
+        fingerprint = SearchFingerprint(bytes: normalizedUTF8)
+    }
+}
+
+final class PayloadPreviewStore: ObservableObject {
+    private struct DecodedPreview {
+        let image: NSImage?
+        let rtf: NSAttributedString?
+        let html: NSAttributedString?
+
+        var hasAnyPayload: Bool {
+            image != nil || rtf != nil || html != nil
+        }
+    }
+
+    private let database: ClipboardDatabase
+    private let loadQueue = DispatchQueue(label: "pastebin.payload.preview.queue", qos: .userInitiated, attributes: .concurrent)
+
+    private let imageCache: NSCache<NSNumber, NSImage> = {
+        let cache = NSCache<NSNumber, NSImage>()
+        cache.countLimit = 320
+        return cache
+    }()
+
+    private let rtfCache: NSCache<NSNumber, NSAttributedString> = {
+        let cache = NSCache<NSNumber, NSAttributedString>()
+        cache.countLimit = 320
+        return cache
+    }()
+
+    private let htmlCache: NSCache<NSNumber, NSAttributedString> = {
+        let cache = NSCache<NSNumber, NSAttributedString>()
+        cache.countLimit = 320
+        return cache
+    }()
+
+    private var inFlightLoads: Set<Int64> = []
+    private var failedLoads: Set<Int64> = []
+    private var changeObservers: [UUID: (Int64) -> Void] = [:]
+
+    init(database: ClipboardDatabase) {
+        self.database = database
+    }
+
+    func imagePayload(for itemID: Int64) -> NSImage? {
+        imageCache.object(forKey: NSNumber(value: itemID))
+    }
+
+    func rtfPayload(for itemID: Int64) -> NSAttributedString? {
+        rtfCache.object(forKey: NSNumber(value: itemID))
+    }
+
+    func htmlPayload(for itemID: Int64) -> NSAttributedString? {
+        htmlCache.object(forKey: NSNumber(value: itemID))
+    }
+
+    @discardableResult
+    func addChangeObserver(_ observer: @escaping (Int64) -> Void) -> UUID {
+        let token = UUID()
+        changeObservers[token] = observer
+        return token
+    }
+
+    func removeChangeObserver(_ token: UUID) {
+        changeObservers[token] = nil
+    }
+
+    func loadIfNeeded(for itemID: Int64) {
+        let key = NSNumber(value: itemID)
+        guard imageCache.object(forKey: key) == nil
+                && rtfCache.object(forKey: key) == nil
+                && htmlCache.object(forKey: key) == nil else {
+            return
+        }
+        guard !inFlightLoads.contains(itemID) else { return }
+        guard !failedLoads.contains(itemID) else { return }
+
+        inFlightLoads.insert(itemID)
+
+        let database = self.database
+        loadQueue.async { [weak self] in
+            let preview: PayloadPreview?
+            do {
+                preview = try database.fetchPayloadPreview(id: itemID)
+            } catch {
+                preview = nil
+            }
+
+            let decodedPreview: DecodedPreview?
+            if let preview {
+                var image: NSImage?
+                var rtf: NSAttributedString?
+                var html: NSAttributedString?
+
+                if let payloadData = preview.payloadData {
+                    image = PreviewImageDecoder.previewImage(from: payloadData)
+                }
+
+                if let rtfData = preview.rtfData,
+                   rtfData.count <= ClipboardContentLimits.maxRichPreviewPayloadBytes {
+                    if let parsedRTF = try? NSAttributedString(
+                        data: rtfData,
+                        options: [.documentType: NSAttributedString.DocumentType.rtf],
+                        documentAttributes: nil
+                    ) {
+                        rtf = Self.sanitizedRichPreview(parsedRTF)
+                    }
+                }
+
+                if let htmlContent = preview.htmlContent,
+                   htmlContent.utf8.count <= ClipboardContentLimits.maxRichPreviewPayloadBytes,
+                   let htmlData = htmlContent.data(using: .utf8) {
+                    if let parsedHTML = try? NSAttributedString(
+                        data: htmlData,
+                        options: [
+                            .documentType: NSAttributedString.DocumentType.html,
+                            .characterEncoding: String.Encoding.utf8.rawValue
+                        ],
+                        documentAttributes: nil
+                    ) {
+                        html = Self.sanitizedRichPreview(parsedHTML)
+                    }
+                }
+
+                decodedPreview = DecodedPreview(image: image, rtf: rtf, html: html)
+            } else {
+                decodedPreview = nil
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.inFlightLoads.remove(itemID)
+
+                guard let decodedPreview else {
+                    self.failedLoads.insert(itemID)
+                    return
+                }
+
+                if let image = decodedPreview.image {
+                    self.imageCache.setObject(image, forKey: key)
+                }
+
+                if let attributed = decodedPreview.rtf {
+                    self.rtfCache.setObject(attributed, forKey: key)
+                }
+
+                if let attributed = decodedPreview.html {
+                    self.htmlCache.setObject(attributed, forKey: key)
+                }
+
+                if !decodedPreview.hasAnyPayload {
+                    self.failedLoads.insert(itemID)
+                }
+                for observer in self.changeObservers.values {
+                    observer(itemID)
+                }
+            }
+        }
+    }
+
+    private static func sanitizedRichPreview(_ attributed: NSAttributedString) -> NSAttributedString {
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        var attachmentRanges: [NSRange] = []
+
+        mutable.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
+            if value != nil {
+                attachmentRanges.append(range)
+            }
+        }
+
+        for range in attachmentRanges.reversed() {
+            mutable.replaceCharacters(in: range, with: " ")
+        }
+
+        let maxLength = ClipboardContentLimits.maxRenderedRichPreviewCharacters
+        if mutable.length > maxLength {
+            mutable.deleteCharacters(in: NSRange(location: maxLength, length: mutable.length - maxLength))
+        }
+
+        return mutable
+    }
+}
+
+final class ClipSelectionState: ObservableObject {
+    @Published private(set) var selectedItemID: Int64?
+
+    func setSelectedItemID(_ itemID: Int64?) {
+        guard selectedItemID != itemID else { return }
+        selectedItemID = itemID
+    }
+}
+
 final class ClipboardStore: ObservableObject {
     @Published private(set) var items: [ClipItem] = []
     @Published private(set) var buckets: [Bucket] = []
@@ -12,20 +217,31 @@ final class ClipboardStore: ObservableObject {
     @Published var query: String = "" {
         didSet {
             guard query != oldValue else { return }
-            if !query.isEmpty {
+            if !query.isEmpty, !isSearchExpanded {
                 isSearchExpanded = true
             }
-            selectedIndex = 0
+            if selectedIndex != 0 {
+                selectedIndex = 0
+            }
             scheduleFiltering(debounce: query.isEmpty ? 0 : Self.searchDebounceInterval)
         }
     }
 
+    @Published private(set) var searchRenderMode: SearchRenderMode = .fullIdle
+    @Published private(set) var isSearchComputationInFlight = false
     @Published private(set) var filteredItems: [ClipItem] = []
     @Published private(set) var hasFinishedInitialLoad = false
     @Published private(set) var isBucketScopeLoading = false
-    @Published var selectedIndex: Int = 0
+    let selectionState = ClipSelectionState()
+    var selectedIndex: Int = 0 {
+        didSet {
+            guard selectedIndex != oldValue else { return }
+            syncSelectionState()
+        }
+    }
 
     private let database: ClipboardDatabase
+    private(set) lazy var payloadStore = PayloadPreviewStore(database: database)
     private var scopedBucketItems: [ClipItem] = []
     private var cachedBucketItemsByID: [Int64: [ClipItem]] = [:]
     private var partialBucketCacheIDs: Set<Int64> = []
@@ -36,13 +252,23 @@ final class ClipboardStore: ObservableObject {
     private var iconCacheInsertOrder: [String] = []
     private var missingBundleIDs: Set<String> = []
     private var pendingIconLookups: Set<String> = []
-    private var hasScheduledIconRefresh = false
+    private var iconObservers: [UUID: (String) -> Void] = [:]
+    private let extendedSearchCache: NSCache<NSNumber, CachedExtendedSearchText> = {
+        let cache = NSCache<NSNumber, CachedExtendedSearchText>()
+        cache.countLimit = 192
+        return cache
+    }()
 
     private let filterQueue = DispatchQueue(label: "pastebin.search.queue", qos: .userInitiated)
+    private let insertQueue = DispatchQueue(label: "pastebin.capture.insert.queue", qos: .userInitiated)
     private let bucketLoadQueue = DispatchQueue(label: "pastebin.bucket.load.queue", qos: .userInitiated, attributes: .concurrent)
     private let iconLookupQueue = DispatchQueue(label: "pastebin.icon.lookup.queue", qos: .userInitiated, attributes: .concurrent)
     private var pendingFilterWork: DispatchWorkItem?
+    private var pendingNavigationRenderIdleWork: DispatchWorkItem?
     private var filterRequestID: UInt64 = 0
+    private var searchCorpusRevision: UInt64 = 0
+    private var searchCache: SearchCache?
+    private var hasNavigationRenderActivity = false
     private let performanceLog = OSLog(
         subsystem: Bundle.main.bundleIdentifier ?? "PasteBin",
         category: "ClipboardStorePerformance"
@@ -58,9 +284,15 @@ final class ClipboardStore: ObservableObject {
     private static let prewarmLoadLimit = 50
     private static let initialIconPreloadCount = 24
     private static let unfilteredDisplayLimit = 1_200
-    private static let searchResultLimit = 250
-    private static let searchDebounceInterval: TimeInterval = 0.04
-    private static let mainThreadSynchronousFilterItemThreshold = 72
+    private static let searchResultLimit = 120
+    private static let searchDebounceInterval: TimeInterval = 0.15
+    private static let fuzzyFallbackIdleDelay: TimeInterval = 0.18
+    private static let fuzzyFallbackPollInterval: TimeInterval = 0.008
+    private static let navigationRenderIdleDelay: TimeInterval = 0.18
+    private static let indexedDirectResultPoolLimit = 240
+    private static let indexedCandidatePoolLimit = 384
+    private static let indexedSearchMinimumTokenCharacterCount = 3
+    private static let strictRerankCandidateLimit = 240
     private static let maxCachedIcons = 320
     private static let maxMissingBundleIDs = 1_024
 
@@ -69,12 +301,36 @@ final class ClipboardStore: ObservableObject {
         case interaction
     }
 
+    private enum SearchCacheKind {
+        case localStrict
+        case extendedStrict
+        case indexedStrict
+    }
+
+    private struct SearchScopeKey: Equatable {
+        let selectedBucketID: Int64?
+        let corpusRevision: UInt64
+    }
+
+    private struct SearchCache {
+        let scopeKey: SearchScopeKey
+        let normalizedQuery: String
+        let kind: SearchCacheKind
+        let strictMatches: [ClipItem]
+    }
+
+    private struct IndexedSearchCandidateSet {
+        let items: [ClipItem]
+        let orderByID: [Int64: Int]
+    }
+
     init(database: ClipboardDatabase) {
         self.database = database
     }
 
     deinit {
         pendingFilterWork?.cancel()
+        pendingNavigationRenderIdleWork?.cancel()
     }
 
     // MARK: - Derived state
@@ -157,6 +413,12 @@ final class ClipboardStore: ObservableObject {
         isInlineTitleEditorActive = false
         isBucketScopeLoading = false
         scopedBucketItems = []
+        pendingNavigationRenderIdleWork?.cancel()
+        pendingNavigationRenderIdleWork = nil
+        hasNavigationRenderActivity = false
+        setSearchComputationInFlight(false, requestID: filterRequestID)
+        setSearchRenderMode(.fullIdle, requestID: filterRequestID)
+        bumpSearchCorpusRevision()
 
         if query.isEmpty {
             scheduleFiltering(debounce: 0)
@@ -167,38 +429,58 @@ final class ClipboardStore: ObservableObject {
     }
 
     func insert(captured: CapturedClipboardItem) {
+        insertQueue.async { [weak self] in
+            guard let self else { return }
+
+            do {
+                let inserted = try self.database.insert(captured: captured)
+
+                let prunedCount: Int
+                do {
+                    prunedCount = try self.pruneHistoryForCurrentRetention(referenceDate: inserted.copiedAt)
+                } catch {
+                    print("Failed applying retention policy after insert: \(error)")
+                    prunedCount = 0
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if prunedCount > 0 {
+                        self.reloadFromDatabaseAsync()
+                        return
+                    }
+
+                    self.applyInsertedItem(inserted)
+                }
+            } catch {
+                print("Failed inserting clipboard item: \(error)")
+            }
+        }
+    }
+
+    func fetchContentForPaste(itemID: Int64) -> PasteContent? {
+        try? database.fetchContentForPaste(id: itemID)
+    }
+
+    func promoteItem(id: Int64) {
         do {
-            let inserted = try database.insert(captured: captured)
+            try database.promoteItem(id: id)
+            let now = Date()
 
-            if let duplicateIndex = items.firstIndex(where: { $0.id == inserted.id }) {
-                items.remove(at: duplicateIndex)
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                let promoted = items[index].promoted(at: now)
+                items.remove(at: index)
+                items.insert(promoted, at: 0)
             }
-
-            items.insert(inserted, at: 0)
-
-            if items.count > Self.defaultLoadLimit {
-                items.removeLast(items.count - Self.defaultLoadLimit)
-            }
-
-            preloadIcons(for: [inserted])
 
             if query.isEmpty {
                 selectedIndex = 0
             }
 
-            do {
-                let prunedCount = try pruneHistoryForCurrentRetention(referenceDate: inserted.copiedAt)
-                if prunedCount > 0 {
-                    reloadFromDatabaseAsync()
-                    return
-                }
-            } catch {
-                print("Failed applying retention policy after insert: \(error)")
-            }
-
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
         } catch {
-            print("Failed inserting clipboard item: \(error)")
+            print("Failed promoting clip item: \(error)")
         }
     }
 
@@ -240,6 +522,7 @@ final class ClipboardStore: ObservableObject {
         isBucketScopeLoading = false
         selectedIndex = 0
         os_signpost(.event, log: performanceLog, name: "ScopeChanged", "scope=%{public}@", "clipboard")
+        bumpSearchCorpusRevision()
         scheduleFiltering(debounce: 0)
     }
 
@@ -264,6 +547,7 @@ final class ClipboardStore: ObservableObject {
                 isPartial ? "partial" : "hit",
                 cached.count
             )
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
 
             if isPartial {
@@ -283,6 +567,7 @@ final class ClipboardStore: ObservableObject {
             bucketID,
             "miss"
         )
+        bumpSearchCorpusRevision()
         scheduleFiltering(debounce: 0)
 
         let quickFetchSignpostID = OSSignpostID(log: performanceLog)
@@ -341,6 +626,7 @@ final class ClipboardStore: ObservableObject {
 
                 self.scopedBucketItems = quickPage
                 self.isBucketScopeLoading = false
+                self.bumpSearchCorpusRevision()
                 self.scheduleFiltering(debounce: 0)
                 applied = 1
 
@@ -357,6 +643,7 @@ final class ClipboardStore: ObservableObject {
 
                 self.scopedBucketItems = []
                 self.isBucketScopeLoading = true
+                self.bumpSearchCorpusRevision()
                 self.scheduleFiltering(debounce: 0)
                 self.reloadSelectedBucketItems()
                 applied = 1
@@ -418,11 +705,20 @@ final class ClipboardStore: ObservableObject {
                 cachedBucketItemsByID[bucketID]?.removeAll(where: { $0.id == item.id })
             }
 
-            let count = filteredItems.count
-            if selectedIndex >= count {
-                selectedIndex = max(count - 1, 0)
+            if let removedFilteredIndex = filteredItems.firstIndex(where: { $0.id == item.id }) {
+                filteredItems.remove(at: removedFilteredIndex)
+                if selectedIndex > removedFilteredIndex {
+                    selectedIndex -= 1
+                }
+                clampSelectedIndex()
+            } else {
+                let count = filteredItems.count
+                if selectedIndex >= count {
+                    selectedIndex = max(count - 1, 0)
+                }
             }
 
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
         } catch {
             print("Failed deleting clip item: \(error)")
@@ -444,6 +740,7 @@ final class ClipboardStore: ObservableObject {
                 scopedBucketItems = []
             }
 
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
         } catch {
             print("Failed deleting bucket: \(error)")
@@ -465,6 +762,7 @@ final class ClipboardStore: ObservableObject {
                         scopedBucketItems.removeLast(scopedBucketItems.count - Self.defaultLoadLimit)
                     }
                     cachedBucketItemsByID[bucketID] = scopedBucketItems
+                    bumpSearchCorpusRevision()
                     scheduleFiltering(debounce: 0)
                 }
 
@@ -495,6 +793,7 @@ final class ClipboardStore: ObservableObject {
             }
             cachedBucketItemsByID[selectedBucketID] = scopedBucketItems
 
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
         } catch {
             print("Failed updating bucket item title: \(error)")
@@ -511,7 +810,10 @@ final class ClipboardStore: ObservableObject {
         }
 
         let nextIndex = selectedIndex + delta
-        selectedIndex = min(max(nextIndex, 0), count - 1)
+        let clampedIndex = min(max(nextIndex, 0), count - 1)
+        guard clampedIndex != selectedIndex else { return }
+        markNavigationRenderActivity()
+        selectedIndex = clampedIndex
     }
 
     func select(_ index: Int) {
@@ -521,7 +823,16 @@ final class ClipboardStore: ObservableObject {
             return
         }
 
-        selectedIndex = min(max(index, 0), count - 1)
+        let clampedIndex = min(max(index, 0), count - 1)
+        guard clampedIndex != selectedIndex else { return }
+        markNavigationRenderActivity()
+        selectedIndex = clampedIndex
+    }
+
+    func selectByID(_ id: Int64) {
+        guard let index = filteredItems.firstIndex(where: { $0.id == id }) else { return }
+        guard index != selectedIndex else { return }
+        selectedIndex = index
     }
 
     func selectedItem() -> ClipItem? {
@@ -551,6 +862,17 @@ final class ClipboardStore: ObservableObject {
 
         _ = queueIconLookupIfNeeded(bundleID: bundleID)
         return fallbackIcon()
+    }
+
+    @discardableResult
+    func addIconObserver(_ observer: @escaping (String) -> Void) -> UUID {
+        let token = UUID()
+        iconObservers[token] = observer
+        return token
+    }
+
+    func removeIconObserver(_ token: UUID) {
+        iconObservers[token] = nil
     }
 
     private func preloadIcons(for items: [ClipItem]) {
@@ -658,25 +980,15 @@ final class ClipboardStore: ObservableObject {
             }
             iconCacheInsertOrder.removeFirst(overflow)
         }
-
-        scheduleIconRefresh()
+        for observer in iconObservers.values {
+            observer(bundleID)
+        }
     }
 
     private func markMissingBundleID(_ bundleID: String) {
         missingBundleIDs.insert(bundleID)
         if missingBundleIDs.count > Self.maxMissingBundleIDs {
             missingBundleIDs = Set(missingBundleIDs.prefix(Self.maxMissingBundleIDs))
-        }
-    }
-
-    private func scheduleIconRefresh() {
-        guard !hasScheduledIconRefresh else { return }
-        hasScheduledIconRefresh = true
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.hasScheduledIconRefresh = false
-            self.objectWillChange.send()
         }
     }
 
@@ -716,8 +1028,135 @@ final class ClipboardStore: ObservableObject {
             isSearchExpanded = false
         }
 
+        bumpSearchCorpusRevision()
         scheduleFiltering(debounce: 0)
         prewarmBucketCaches(excluding: selectedBucketID)
+    }
+
+    private func syncSelectionState() {
+        selectionState.setSelectedItemID(currentSelectedItemID)
+    }
+
+    private func bumpSearchCorpusRevision() {
+        searchCorpusRevision &+= 1
+        searchCache = nil
+        extendedSearchCache.removeAllObjects()
+    }
+
+    private func cachedExtendedSearchContent(
+        for item: ClipItem,
+        database: ClipboardDatabase,
+        shouldContinue: @escaping () -> Bool
+    ) -> CachedExtendedSearchText? {
+        let cacheKey = NSNumber(value: item.id)
+        if let cached = extendedSearchCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        guard let fullText = database.fetchExtendedSearchText(id: item.id) else {
+            return nil
+        }
+        guard shouldContinue() else { return nil }
+
+        let searchableSource = ([fullText, item.customTitle].compactMap { $0 })
+            .joined(separator: " ")
+        let boundedSearchable = ClipboardContentLimits.searchProjection(
+            searchableSource,
+            to: ClipboardContentLimits.maxExtendedSearchUTF8Bytes
+        )
+        let normalizedUTF8 = ContiguousArray(FuzzyMatcher.normalize(boundedSearchable).utf8)
+        let cached = CachedExtendedSearchText(normalizedUTF8: normalizedUTF8)
+        extendedSearchCache.setObject(cached, forKey: cacheKey)
+        return cached
+    }
+
+    private func reusableLocalStrictSearchPool(
+        previousCache: SearchCache?,
+        for scopeKey: SearchScopeKey,
+        normalizedQuery: String
+    ) -> [ClipItem]? {
+        guard let previousCache else { return nil }
+        guard previousCache.kind == .localStrict || previousCache.kind == .extendedStrict else { return nil }
+        guard previousCache.scopeKey == scopeKey else { return nil }
+        guard !previousCache.strictMatches.isEmpty else { return nil }
+        guard normalizedQuery.count > previousCache.normalizedQuery.count else { return nil }
+        guard normalizedQuery.hasPrefix(previousCache.normalizedQuery) else { return nil }
+        return previousCache.strictMatches
+    }
+
+    private func beginSearchComputation(requestID: UInt64, hasSearchQuery: Bool) {
+        if hasSearchQuery {
+            setSearchComputationInFlight(true, requestID: requestID)
+        } else {
+            setSearchComputationInFlight(false, requestID: requestID)
+        }
+        refreshRenderMode(requestID: requestID)
+    }
+
+    private func endSearchComputation(requestID: UInt64) {
+        guard requestID == filterRequestID else { return }
+        setSearchComputationInFlight(false, requestID: requestID)
+        refreshRenderMode(requestID: requestID)
+    }
+
+    private func setSearchRenderMode(_ mode: SearchRenderMode, requestID: UInt64) {
+        guard searchRenderMode != mode else { return }
+        searchRenderMode = mode
+        os_signpost(
+            .event,
+            log: performanceLog,
+            name: "SearchRenderModeChanged",
+            "request=%{public}llu mode=%{public}@",
+            requestID,
+            mode.rawValue as NSString
+        )
+    }
+
+    private func setSearchComputationInFlight(_ isInFlight: Bool, requestID: UInt64) {
+        guard isSearchComputationInFlight != isInFlight else { return }
+        isSearchComputationInFlight = isInFlight
+        os_signpost(
+            .event,
+            log: performanceLog,
+            name: "SearchComputationStateChanged",
+            "request=%{public}llu in_flight=%{public}d",
+            requestID,
+            isInFlight ? 1 : 0
+        )
+    }
+
+    private func refreshRenderMode(requestID: UInt64) {
+        let mode: SearchRenderMode
+        if isSearchComputationInFlight {
+            mode = .lightweightTyping
+        } else if hasNavigationRenderActivity {
+            mode = .interactiveNavigation
+        } else {
+            mode = .fullIdle
+        }
+        setSearchRenderMode(mode, requestID: requestID)
+    }
+
+    private func markNavigationRenderActivity() {
+        pendingNavigationRenderIdleWork?.cancel()
+        pendingNavigationRenderIdleWork = nil
+
+        if !hasNavigationRenderActivity {
+            hasNavigationRenderActivity = true
+            refreshRenderMode(requestID: filterRequestID)
+        }
+
+        let requestID = filterRequestID
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingNavigationRenderIdleWork = nil
+            guard self.hasNavigationRenderActivity else { return }
+            self.hasNavigationRenderActivity = false
+            self.refreshRenderMode(requestID: requestID)
+        }
+
+        pendingNavigationRenderIdleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.navigationRenderIdleDelay, execute: work)
     }
 
     private func scheduleFiltering(debounce: TimeInterval) {
@@ -726,12 +1165,149 @@ final class ClipboardStore: ObservableObject {
         filterRequestID &+= 1
         let requestID = filterRequestID
         let querySnapshot = query
+        let normalizedQuerySnapshot = FuzzyMatcher.normalize(querySnapshot)
+        let hasSearchQuery = !normalizedQuerySnapshot.isEmpty
         let itemsSnapshot = selectedBucketID == nil ? items : scopedBucketItems
+        let selectedBucketIDSnapshot = selectedBucketID
+        let searchScopeKey = SearchScopeKey(
+            selectedBucketID: selectedBucketIDSnapshot,
+            corpusRevision: searchCorpusRevision
+        )
+        let previousSearchCache = searchCache
+        let database = self.database
         let searchLimit = Self.searchResultLimit
         let unfilteredLimit = Self.unfilteredDisplayLimit
         let perfLog = performanceLog
         let filterSignpostID = OSSignpostID(log: perfLog)
-        let computeFiltered: () -> [ClipItem] = {
+        let strictTokens = FuzzyMatcher.strictQueryTokens(normalizedQuery: normalizedQuerySnapshot)
+        let indexEligibleTokens = strictTokens.filter {
+            $0.count >= Self.indexedSearchMinimumTokenCharacterCount
+                && String($0).canBeConverted(to: .ascii)
+        }
+        let canUseDirectIndexedSearch = selectedBucketIDSnapshot == nil
+            && !strictTokens.isEmpty
+            && indexEligibleTokens.count == strictTokens.count
+        let itemsByID = Dictionary(uniqueKeysWithValues: itemsSnapshot.map { ($0.id, $0) })
+        beginSearchComputation(requestID: requestID, hasSearchQuery: hasSearchQuery)
+        let reusedLocalStrictPool = reusableLocalStrictSearchPool(
+            previousCache: previousSearchCache,
+            for: searchScopeKey,
+            normalizedQuery: normalizedQuerySnapshot
+        )
+        let rerankMatches: (_ candidates: [ClipItem], _ indexedOrderByID: [Int64: Int]) -> [ClipItem] = { candidates, indexedOrderByID in
+            SearchRanker.rerank(
+                normalizedQuery: normalizedQuerySnapshot,
+                queryTokens: strictTokens,
+                candidates: candidates,
+                indexedOrderByID: indexedOrderByID,
+                limit: searchLimit
+            )
+        }
+        let fetchIndexedSearchCandidates: (_ limit: Int, _ shouldContinue: @escaping () -> Bool) -> IndexedSearchCandidateSet? = { limit, shouldContinue in
+            guard limit > 0 else {
+                return IndexedSearchCandidateSet(items: [], orderByID: [:])
+            }
+            guard shouldContinue() else {
+                return IndexedSearchCandidateSet(items: [], orderByID: [:])
+            }
+
+            guard let indexedMatches = database.fetchIndexedClipItemMatches(
+                containingAllNormalizedTokens: indexEligibleTokens,
+                limit: limit
+            ) else {
+                return nil
+            }
+            guard shouldContinue() else {
+                return IndexedSearchCandidateSet(items: [], orderByID: [:])
+            }
+
+            var candidates: [ClipItem] = []
+            candidates.reserveCapacity(min(limit, indexedMatches.count))
+            var orderByID: [Int64: Int] = [:]
+            orderByID.reserveCapacity(indexedMatches.count)
+
+            for match in indexedMatches {
+                guard let item = itemsByID[match.id] else { continue }
+                orderByID[item.id] = candidates.count
+                candidates.append(item)
+            }
+
+            return IndexedSearchCandidateSet(items: candidates, orderByID: orderByID)
+        }
+        let directIndexedStrictMatches: (_ shouldContinue: @escaping () -> Bool) -> IndexedSearchCandidateSet? = { shouldContinue in
+            guard canUseDirectIndexedSearch else { return nil }
+            return fetchIndexedSearchCandidates(
+                min(itemsSnapshot.count, Self.indexedDirectResultPoolLimit),
+                shouldContinue
+            )
+        }
+        let indexedStrictSearchCandidates: (_ shouldContinue: @escaping () -> Bool) -> IndexedSearchCandidateSet? = { shouldContinue in
+            guard selectedBucketIDSnapshot == nil else { return nil }
+            guard !indexEligibleTokens.isEmpty else {
+                return nil
+            }
+            return fetchIndexedSearchCandidates(
+                min(itemsSnapshot.count, Self.indexedCandidatePoolLimit),
+                shouldContinue
+            )
+        }
+        let extendedStrictMatches: (_ excludingIDs: Set<Int64>, _ limit: Int, _ shouldContinue: @escaping () -> Bool) -> [ClipItem] = { excludingIDs, limit, shouldContinue in
+            guard limit > 0 else { return [] }
+            guard !normalizedQuerySnapshot.isEmpty else { return [] }
+
+            let overflowCandidates = itemsSnapshot.filter {
+                $0.hasSearchableOverflow && !excludingIDs.contains($0.id)
+            }
+            guard !overflowCandidates.isEmpty else { return [] }
+
+            var matches: [ClipItem] = []
+            matches.reserveCapacity(min(limit, overflowCandidates.count))
+
+            for (itemIndex, item) in overflowCandidates.enumerated() {
+                if itemIndex & 3 == 0, !shouldContinue() {
+                    return []
+                }
+
+                guard let cachedContent = self.cachedExtendedSearchContent(
+                    for: item,
+                    database: database,
+                    shouldContinue: shouldContinue
+                ) else {
+                    continue
+                }
+
+                guard FuzzyMatcher.strictMatch(
+                    normalizedQuery: normalizedQuerySnapshot,
+                    in: cachedContent.normalizedUTF8,
+                    fingerprint: cachedContent.fingerprint,
+                    shouldContinue: shouldContinue
+                ) else {
+                    continue
+                }
+
+                matches.append(item)
+                if matches.count >= limit {
+                    break
+                }
+            }
+
+            return matches
+        }
+        let awaitFuzzyFallbackIdleWindow: (_ shouldContinue: @escaping () -> Bool) -> Bool = { shouldContinue in
+            guard Self.fuzzyFallbackIdleDelay > 0 else {
+                return shouldContinue()
+            }
+
+            let deadline = DispatchTime.now().uptimeNanoseconds
+                + UInt64(Self.fuzzyFallbackIdleDelay * 1_000_000_000)
+            while DispatchTime.now().uptimeNanoseconds < deadline {
+                guard shouldContinue() else { return false }
+                Thread.sleep(forTimeInterval: Self.fuzzyFallbackPollInterval)
+            }
+
+            return shouldContinue()
+        }
+        let computeFiltered: (_ shouldContinue: @escaping () -> Bool) -> (filtered: [ClipItem], cache: SearchCache?) = { shouldContinue in
             os_signpost(
                 .begin,
                 log: perfLog,
@@ -744,11 +1320,83 @@ final class ClipboardStore: ObservableObject {
             )
 
             let filtered: [ClipItem]
-            let normalizedQuery = FuzzyMatcher.normalize(querySnapshot)
-            if normalizedQuery.isEmpty {
+            let nextSearchCache: SearchCache?
+            if normalizedQuerySnapshot.isEmpty {
                 filtered = Array(itemsSnapshot.prefix(unfilteredLimit))
+                nextSearchCache = nil
+            } else if let directMatches = directIndexedStrictMatches(shouldContinue) {
+                var combinedMatches = rerankMatches(directMatches.items, directMatches.orderByID)
+                let overflowMatches = extendedStrictMatches(
+                    Set(combinedMatches.map(\.id)),
+                    max(0, searchLimit - combinedMatches.count),
+                    shouldContinue
+                )
+                if !overflowMatches.isEmpty {
+                    combinedMatches.append(contentsOf: overflowMatches)
+                }
+
+                if !combinedMatches.isEmpty {
+                    filtered = combinedMatches
+                    nextSearchCache = SearchCache(
+                        scopeKey: searchScopeKey,
+                        normalizedQuery: normalizedQuerySnapshot,
+                        kind: overflowMatches.isEmpty ? .indexedStrict : .extendedStrict,
+                        strictMatches: combinedMatches
+                    )
+                } else if awaitFuzzyFallbackIdleWindow(shouldContinue) {
+                    filtered = FuzzyMatcher.fuzzyFilter(
+                        normalizedQuery: normalizedQuerySnapshot,
+                        in: itemsSnapshot,
+                        limit: searchLimit,
+                        shouldContinue: shouldContinue
+                    )
+                    nextSearchCache = nil
+                } else {
+                    filtered = []
+                    nextSearchCache = nil
+                }
             } else {
-                filtered = FuzzyMatcher.filter(normalizedQuery: normalizedQuery, in: itemsSnapshot, limit: searchLimit)
+                let indexedCandidates = indexedStrictSearchCandidates(shouldContinue)
+                let strictSearchPool = reusedLocalStrictPool
+                    ?? indexedCandidates?.items
+                    ?? itemsSnapshot
+                let strictMatches = FuzzyMatcher.strictFilter(
+                    normalizedQuery: normalizedQuerySnapshot,
+                    in: strictSearchPool,
+                    limit: Self.strictRerankCandidateLimit,
+                    shouldContinue: shouldContinue
+                )
+
+                var combinedMatches = rerankMatches(strictMatches, indexedCandidates?.orderByID ?? [:])
+                let overflowMatches = extendedStrictMatches(
+                    Set(combinedMatches.map(\.id)),
+                    max(0, searchLimit - combinedMatches.count),
+                    shouldContinue
+                )
+                if !overflowMatches.isEmpty {
+                    combinedMatches.append(contentsOf: overflowMatches)
+                }
+
+                if !combinedMatches.isEmpty {
+                    filtered = combinedMatches
+                    nextSearchCache = SearchCache(
+                        scopeKey: searchScopeKey,
+                        normalizedQuery: normalizedQuerySnapshot,
+                        kind: overflowMatches.isEmpty ? .localStrict : .extendedStrict,
+                        strictMatches: combinedMatches
+                    )
+                } else if awaitFuzzyFallbackIdleWindow(shouldContinue) {
+                    filtered = FuzzyMatcher.fuzzyFilter(
+                        normalizedQuery: normalizedQuerySnapshot,
+                        in: itemsSnapshot,
+                        limit: searchLimit,
+                        shouldContinue: shouldContinue
+                    )
+                    nextSearchCache = nil
+                } else {
+                    filtered = []
+                    nextSearchCache = nil
+                }
             }
 
             os_signpost(
@@ -761,42 +1409,16 @@ final class ClipboardStore: ObservableObject {
                 filtered.count
             )
 
-            return filtered
+            return (filtered, nextSearchCache)
         }
 
-        if shouldFilterImmediatelyOnMainThread(
-            debounce: debounce,
-            query: querySnapshot,
-            itemCount: itemsSnapshot.count
-        ) {
-            let filtered = computeFiltered()
-            let applySignpostID = OSSignpostID(log: perfLog)
-            os_signpost(
-                .begin,
-                log: perfLog,
-                name: "FilterApply",
-                signpostID: applySignpostID,
-                "request=%{public}llu",
-                requestID
-            )
-
-            filteredItems = filtered
-            clampSelectedIndex()
-
-            os_signpost(
-                .end,
-                log: perfLog,
-                name: "FilterApply",
-                signpostID: applySignpostID,
-                "request=%{public}llu results=%{public}d",
-                requestID,
-                filtered.count
-            )
-            return
+        var workItem: DispatchWorkItem?
+        let shouldContinue: () -> Bool = {
+            !(workItem?.isCancelled ?? false)
         }
 
         let work = DispatchWorkItem { [weak self] in
-            let filtered = computeFiltered()
+            let computed = computeFiltered(shouldContinue)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -822,8 +1444,12 @@ final class ClipboardStore: ObservableObject {
                     requestID
                 )
 
-                self.filteredItems = filtered
+                self.searchCache = computed.cache
+                if !self.filteredItemsMatch(computed.filtered) {
+                    self.filteredItems = computed.filtered
+                }
                 self.clampSelectedIndex()
+                self.endSearchComputation(requestID: requestID)
 
                 os_signpost(
                     .end,
@@ -832,10 +1458,11 @@ final class ClipboardStore: ObservableObject {
                     signpostID: applySignpostID,
                     "request=%{public}llu results=%{public}d",
                     requestID,
-                    filtered.count
+                    computed.filtered.count
                 )
             }
         }
+        workItem = work
 
         pendingFilterWork = work
 
@@ -846,21 +1473,12 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
-    private func shouldFilterImmediatelyOnMainThread(
-        debounce: TimeInterval,
-        query: String,
-        itemCount: Int
-    ) -> Bool {
-        guard debounce <= 0, Thread.isMainThread else { return false }
-        guard query.isEmpty else { return false }
-        return itemCount <= Self.mainThreadSynchronousFilterItemThreshold
-    }
-
     private func reloadSelectedBucketItems() {
         guard let selectedBucketID else {
             selectedBucketLoadRequestID &+= 1
             scopedBucketItems = []
             isBucketScopeLoading = false
+            bumpSearchCorpusRevision()
             scheduleFiltering(debounce: 0)
             return
         }
@@ -918,6 +1536,7 @@ final class ClipboardStore: ObservableObject {
 
                 self.scopedBucketItems = bucketItems
                 self.isBucketScopeLoading = false
+                self.bumpSearchCorpusRevision()
                 self.scheduleFiltering(debounce: 0)
                 applied = 1
             case .failure(let error):
@@ -930,6 +1549,7 @@ final class ClipboardStore: ObservableObject {
 
                 self.scopedBucketItems = []
                 self.isBucketScopeLoading = false
+                self.bumpSearchCorpusRevision()
                 self.scheduleFiltering(debounce: 0)
                 applied = 1
             }
@@ -1017,6 +1637,7 @@ final class ClipboardStore: ObservableObject {
 
             self.scopedBucketItems = bucketItems
             self.isBucketScopeLoading = false
+            self.bumpSearchCorpusRevision()
             self.scheduleFiltering(debounce: 0)
             appliedToVisibleScope = 1
 
@@ -1067,6 +1688,7 @@ final class ClipboardStore: ObservableObject {
 
             guard self.selectedBucketID == bucketID else { return }
             self.scopedBucketItems = bucketItems
+            self.bumpSearchCorpusRevision()
             self.scheduleFiltering(debounce: 0)
         }
     }
@@ -1115,12 +1737,54 @@ final class ClipboardStore: ObservableObject {
         item.withCustomTitle(customTitle)
     }
 
+    private func applyInsertedItem(_ inserted: ClipItem) {
+        if let duplicateIndex = items.firstIndex(where: { $0.id == inserted.id }) {
+            items.remove(at: duplicateIndex)
+        }
+
+        items.insert(inserted, at: 0)
+
+        if items.count > Self.defaultLoadLimit {
+            items.removeLast(items.count - Self.defaultLoadLimit)
+        }
+
+        preloadIcons(for: [inserted])
+
+        if query.isEmpty {
+            selectedIndex = 0
+        }
+
+        bumpSearchCorpusRevision()
+        scheduleFiltering(debounce: 0)
+    }
+
+    private func filteredItemsMatch(_ newItems: [ClipItem]) -> Bool {
+        let current = filteredItems
+        guard current.count == newItems.count else { return false }
+        for i in current.indices {
+            if current[i].id != newItems[i].id
+                || current[i].copiedAt != newItems[i].copiedAt
+                || current[i].customTitle != newItems[i].customTitle {
+                return false
+            }
+        }
+        return true
+    }
+
     private func clampSelectedIndex() {
         guard !filteredItems.isEmpty else {
-            selectedIndex = 0
+            if selectedIndex != 0 { selectedIndex = 0 }
+            syncSelectionState()
             return
         }
 
-        selectedIndex = min(max(selectedIndex, 0), filteredItems.count - 1)
+        let clamped = min(max(selectedIndex, 0), filteredItems.count - 1)
+        if selectedIndex != clamped { selectedIndex = clamped }
+        syncSelectionState()
+    }
+
+    private var currentSelectedItemID: Int64? {
+        guard filteredItems.indices.contains(selectedIndex) else { return nil }
+        return filteredItems[selectedIndex].id
     }
 }

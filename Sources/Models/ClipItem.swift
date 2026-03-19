@@ -64,9 +64,10 @@ struct ClipItem: Identifiable, Equatable {
     }
 
     private static let previewCharacterLimit = 420
+    private static let compactPreviewInputLimit = 2_048
+    private static let snippetLineLimit = 6
 
     let id: Int64
-    let content: String
     let copiedAt: Date
     let sourceBundleID: String?
     let sourceAppName: String?
@@ -79,14 +80,18 @@ struct ClipItem: Identifiable, Equatable {
     let filePaths: [String]
     let imageWidth: Int?
     let imageHeight: Int?
-    let payloadData: Data?
-    let rtfData: Data?
-    let htmlContent: String?
     let dedupeKey: String
-    let searchableContent: String
     let searchableContentUTF8: ContiguousArray<UInt8>
+    let searchableFingerprint: SearchFingerprint
+    let hasSearchableOverflow: Bool
     let characterCount: Int
     let previewText: String
+    let snippetPreview: String
+    let codeSnippetText: String
+    let structuredSnippetText: String
+    let hasPayloadData: Bool
+    let hasRTFData: Bool
+    let hasHTMLContent: Bool
 
     init(
         id: Int64,
@@ -102,22 +107,22 @@ struct ClipItem: Identifiable, Equatable {
         filePathsJSON: String? = nil,
         imageWidth: Int? = nil,
         imageHeight: Int? = nil,
-        payloadData: Data? = nil,
-        rtfData: Data? = nil,
-        htmlContent: String? = nil,
-        dedupeKey: String? = nil
+        hasPayloadData: Bool = false,
+        hasRTFData: Bool = false,
+        hasHTMLContent: Bool = false,
+        dedupeKey: String? = nil,
+        characterCount: Int? = nil
     ) {
         self.id = id
-        self.content = content
         self.copiedAt = copiedAt
         self.sourceBundleID = sourceBundleID
         self.sourceAppName = sourceAppName
         self.customTitle = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
-        self.payloadData = payloadData
-        self.rtfData = rtfData
-        self.htmlContent = htmlContent
+        self.hasPayloadData = hasPayloadData
+        self.hasRTFData = hasRTFData
+        self.hasHTMLContent = hasHTMLContent
 
         let normalizedRawType = contentTypeRaw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let resolvedStructuredFormat = structuredFormatRaw.flatMap {
@@ -146,19 +151,45 @@ struct ClipItem: Identifiable, Equatable {
             hasFilePaths: !self.filePaths.isEmpty
         )
 
-        let normalizedDedupeKey = dedupeKey?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.dedupeKey = (normalizedDedupeKey?.isEmpty == false) ? normalizedDedupeKey! : content
+        // Snippet preview: bounded prefix for code/JSON card display.
+        let snippetPreview = ClipboardContentLimits.truncateUTF8PreservingScalarBoundaries(
+            content,
+            to: ClipboardContentLimits.maxSnippetPreviewUTF8Bytes
+        )
+        self.snippetPreview = snippetPreview
+        let codeSnippetText = Self.boundedSnippet(from: snippetPreview, maxLines: Self.snippetLineLimit)
+        self.codeSnippetText = codeSnippetText
+        self.structuredSnippetText = Self.structuredSnippet(
+            from: snippetPreview,
+            format: resolvedStructuredFormat,
+            fallback: codeSnippetText
+        )
 
-        let searchable = ([content, self.customTitle].compactMap { $0 })
+        let normalizedDedupeKey = dedupeKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.dedupeKey = (normalizedDedupeKey?.isEmpty == false) ? normalizedDedupeKey! : self.snippetPreview
+
+        let searchableSource = ([content, self.customTitle].compactMap { $0 })
             .joined(separator: " ")
+        let searchInput = ClipboardContentLimits.truncateUTF8PreservingScalarBoundaries(
+            searchableSource,
+            to: ClipboardContentLimits.maxSearchableTextUTF8Bytes
+        )
+        let searchable = searchInput
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
-        self.searchableContent = searchable
         self.searchableContentUTF8 = ContiguousArray(searchable.utf8)
-        self.characterCount = content.count
+        self.searchableFingerprint = SearchFingerprint(bytes: self.searchableContentUTF8)
+        self.characterCount = characterCount ?? content.count
+        self.hasSearchableOverflow = searchableSource.utf8.count > ClipboardContentLimits.maxSearchableTextUTF8Bytes
+            || self.characterCount > searchInput.count
 
+        // Truncate input before running compactPreview to avoid O(n) on huge strings
+        let previewInput = ClipboardContentLimits.truncateUTF8PreservingScalarBoundaries(
+            content,
+            to: Self.compactPreviewInputLimit
+        )
         let previewBase = Self.previewBase(
-            content: content,
+            content: previewInput,
             contentType: self.contentType,
             linkDisplayText: self.linkDisplayText,
             filePaths: self.filePaths,
@@ -166,6 +197,126 @@ struct ClipItem: Identifiable, Equatable {
             imageHeight: self.imageHeight
         )
         self.previewText = Self.truncatedPreview(previewBase)
+    }
+
+    /// Clone helper: create a promoted copy with a new copiedAt date.
+    /// Copies all pre-computed fields directly without re-processing content.
+    func promoted(at date: Date) -> ClipItem {
+        ClipItem(
+            id: id,
+            copiedAt: date,
+            sourceBundleID: sourceBundleID,
+            sourceAppName: sourceAppName,
+            customTitle: customTitle,
+            contentType: contentType,
+            linkURL: linkURL,
+            linkDisplayText: linkDisplayText,
+            codeLanguage: codeLanguage,
+            structuredFormat: structuredFormat,
+            filePaths: filePaths,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+            dedupeKey: dedupeKey,
+            searchableContentUTF8: searchableContentUTF8,
+            searchableFingerprint: searchableFingerprint,
+            hasSearchableOverflow: hasSearchableOverflow,
+            characterCount: characterCount,
+            previewText: previewText,
+            snippetPreview: snippetPreview,
+            codeSnippetText: codeSnippetText,
+            structuredSnippetText: structuredSnippetText,
+            hasPayloadData: hasPayloadData,
+            hasRTFData: hasRTFData,
+            hasHTMLContent: hasHTMLContent
+        )
+    }
+
+    /// Clone helper: create a copy with a different custom title.
+    /// Copies all pre-computed fields directly without re-processing content.
+    func withCustomTitle(_ customTitle: String?) -> ClipItem {
+        let normalized = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ClipItem(
+            id: id,
+            copiedAt: copiedAt,
+            sourceBundleID: sourceBundleID,
+            sourceAppName: sourceAppName,
+            customTitle: normalized,
+            contentType: contentType,
+            linkURL: linkURL,
+            linkDisplayText: linkDisplayText,
+            codeLanguage: codeLanguage,
+            structuredFormat: structuredFormat,
+            filePaths: filePaths,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+            dedupeKey: dedupeKey,
+            searchableContentUTF8: searchableContentUTF8,
+            searchableFingerprint: searchableFingerprint,
+            hasSearchableOverflow: hasSearchableOverflow,
+            characterCount: characterCount,
+            previewText: previewText,
+            snippetPreview: snippetPreview,
+            codeSnippetText: codeSnippetText,
+            structuredSnippetText: structuredSnippetText,
+            hasPayloadData: hasPayloadData,
+            hasRTFData: hasRTFData,
+            hasHTMLContent: hasHTMLContent
+        )
+    }
+
+    /// Private memberwise init for clone helpers — avoids re-deriving everything.
+    private init(
+        id: Int64,
+        copiedAt: Date,
+        sourceBundleID: String?,
+        sourceAppName: String?,
+        customTitle: String?,
+        contentType: ClipContentType,
+        linkURL: URL?,
+        linkDisplayText: String?,
+        codeLanguage: String?,
+        structuredFormat: StructuredContentFormat?,
+        filePaths: [String],
+        imageWidth: Int?,
+        imageHeight: Int?,
+        dedupeKey: String,
+        searchableContentUTF8: ContiguousArray<UInt8>,
+        searchableFingerprint: SearchFingerprint,
+        hasSearchableOverflow: Bool,
+        characterCount: Int,
+        previewText: String,
+        snippetPreview: String,
+        codeSnippetText: String,
+        structuredSnippetText: String,
+        hasPayloadData: Bool,
+        hasRTFData: Bool,
+        hasHTMLContent: Bool
+    ) {
+        self.id = id
+        self.copiedAt = copiedAt
+        self.sourceBundleID = sourceBundleID
+        self.sourceAppName = sourceAppName
+        self.customTitle = customTitle
+        self.contentType = contentType
+        self.linkURL = linkURL
+        self.linkDisplayText = linkDisplayText
+        self.codeLanguage = codeLanguage
+        self.structuredFormat = structuredFormat
+        self.filePaths = filePaths
+        self.imageWidth = imageWidth
+        self.imageHeight = imageHeight
+        self.dedupeKey = dedupeKey
+        self.searchableContentUTF8 = searchableContentUTF8
+        self.searchableFingerprint = searchableFingerprint
+        self.hasSearchableOverflow = hasSearchableOverflow
+        self.characterCount = characterCount
+        self.previewText = previewText
+        self.snippetPreview = snippetPreview
+        self.codeSnippetText = codeSnippetText
+        self.structuredSnippetText = structuredSnippetText
+        self.hasPayloadData = hasPayloadData
+        self.hasRTFData = hasRTFData
+        self.hasHTMLContent = hasHTMLContent
     }
 
     var typeLabel: String {
@@ -191,28 +342,6 @@ struct ClipItem: Identifiable, Equatable {
 
     var structuredFormatLabel: String? {
         structuredFormat?.label
-    }
-
-    func withCustomTitle(_ customTitle: String?) -> ClipItem {
-        ClipItem(
-            id: id,
-            content: content,
-            copiedAt: copiedAt,
-            sourceBundleID: sourceBundleID,
-            sourceAppName: sourceAppName,
-            customTitle: customTitle,
-            contentTypeRaw: contentType.storageValue,
-            linkURLString: linkURL?.absoluteString,
-            codeLanguage: codeLanguage,
-            structuredFormatRaw: structuredFormat?.rawValue,
-            filePathsJSON: Self.encodeFilePaths(filePaths),
-            imageWidth: imageWidth,
-            imageHeight: imageHeight,
-            payloadData: payloadData,
-            rtfData: rtfData,
-            htmlContent: htmlContent,
-            dedupeKey: dedupeKey
-        )
     }
 
     static func encodeFilePaths(_ filePaths: [String]) -> String? {
@@ -374,10 +503,15 @@ struct ClipItem: Identifiable, Equatable {
         guard !trimmed.isEmpty else { return "" }
 
         var collapsed = String()
-        collapsed.reserveCapacity(trimmed.count)
+        collapsed.reserveCapacity(min(trimmed.count, previewCharacterLimit + 10))
 
         var lastWasWhitespace = false
+        var outputCount = 0
         for scalar in trimmed.unicodeScalars {
+            if outputCount > previewCharacterLimit {
+                break
+            }
+
             let v = scalar.value
             // ASCII fast path avoids CharacterSet lookup for the common case
             let isWS: Bool
@@ -391,16 +525,77 @@ struct ClipItem: Identifiable, Equatable {
             if isWS {
                 if !lastWasWhitespace {
                     collapsed.append(" ")
+                    outputCount += 1
                     lastWasWhitespace = true
                 }
                 continue
             }
 
             collapsed.unicodeScalars.append(scalar)
+            outputCount += 1
             lastWasWhitespace = false
         }
 
         return collapsed
+    }
+
+    private static func structuredSnippet(
+        from snippetPreview: String,
+        format: StructuredContentFormat?,
+        fallback: String
+    ) -> String {
+        guard let format else { return fallback }
+
+        switch format {
+        case .json:
+            guard snippetPreview.utf8.count <= ClipboardContentLimits.maxJSONPreviewUTF8Bytes,
+                  let data = snippetPreview.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data, options: []),
+                  let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
+                  let prettyString = String(data: pretty, encoding: .utf8) else {
+                return fallback
+            }
+            return boundedSnippet(from: prettyString, maxLines: snippetLineLimit)
+
+        case .xml, .csv:
+            return fallback
+        }
+    }
+
+    private static func boundedSnippet(from value: String, maxLines: Int) -> String {
+        guard maxLines > 0 else { return "" }
+
+        let limitedInput = ClipboardContentLimits
+            .truncateUTF8PreservingScalarBoundaries(value, to: ClipboardContentLimits.maxRenderedSnippetUTF8Bytes)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !limitedInput.isEmpty else { return "" }
+
+        var snippet = String()
+        snippet.reserveCapacity(min(limitedInput.count, ClipboardContentLimits.maxRenderedSnippetCharacters))
+        var lineCount = 1
+        var characterCount = 0
+
+        for character in limitedInput {
+            if lineCount > maxLines {
+                break
+            }
+
+            if characterCount >= ClipboardContentLimits.maxRenderedSnippetCharacters {
+                break
+            }
+
+            snippet.append(character)
+            characterCount += 1
+
+            if character == "\n" {
+                lineCount += 1
+                if lineCount > maxLines {
+                    break
+                }
+            }
+        }
+
+        return snippet.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func filePathsFromLegacyContent(_ content: String, rawType: String?) -> [String] {

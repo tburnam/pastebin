@@ -7,12 +7,15 @@ struct ClipCardView: View {
     let isSelected: Bool
     let commandNumber: Int?
     let icon: NSImage?
+    let renderMode: SearchRenderMode
     let accentColorOverride: Color?
     let isTitleEditable: Bool
     let onTitleChange: ((String?) -> Void)?
     let onTitleEditingStateChange: ((Bool) -> Void)?
-    @ObservedObject var linkPreviewStore: LinkPreviewStore
-    @ObservedObject var filePreviewStore: FilePreviewStore
+    let linkPreviewData: LinkPreviewData?
+    let resolvedFilePreviewImage: NSImage?
+    let resolvedImagePreview: NSImage?
+    let richTextPreviewSource: NSAttributedString?
 
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
@@ -69,32 +72,9 @@ struct ClipCardView: View {
         "granola": offWhiteAccent,
         "obsidian": blackAccent
     ]
-    private static let richTextPreviewCache = NSCache<NSString, NSAttributedString>()
-    private static let imagePreviewCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 320
-        return cache
-    }()
-    private static let fileImageFallbackCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 320
-        return cache
-    }()
-    private static let fileIconCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 320
-        return cache
-    }()
-    private static let jsonSnippetCache: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 320
-        return cache
-    }()
-    private static let codeSnippetCache: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 320
-        return cache
-    }()
+    private var isLightweightRendering: Bool {
+        renderMode == .lightweightTyping
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -115,15 +95,6 @@ struct ClipCardView: View {
                 )
         }
         .shadow(color: .black.opacity(isSelected ? 0.32 : 0.20), radius: isSelected ? 10 : 6, y: 2)
-        .task(id: item.linkURL?.absoluteString) {
-            guard let linkURL = item.linkURL else { return }
-            linkPreviewStore.loadPreview(for: linkURL)
-        }
-        .task(id: firstFilePath) {
-            guard case .fileList = item.contentType else { return }
-            guard let firstFilePath else { return }
-            filePreviewStore.loadPreview(for: firstFilePath)
-        }
         .onChange(of: item.customTitle) { _, _ in
             guard !isEditingTitle else { return }
             titleDraft = item.customTitle ?? ""
@@ -249,7 +220,7 @@ struct ClipCardView: View {
 
     private var codeContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            snippetPanel(text: codeSnippetText, monospaced: true, lineLimit: snippetPreviewLineLimit)
+            snippetPanel(text: item.codeSnippetText, monospaced: true, lineLimit: snippetPreviewLineLimit)
                 .padding(.top, 12)
 
             Spacer(minLength: 0)
@@ -263,7 +234,11 @@ struct ClipCardView: View {
 
     private var structuredContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            snippetPanel(text: structuredSnippetText, monospaced: true, lineLimit: snippetPreviewLineLimit)
+            snippetPanel(
+                text: isLightweightRendering ? item.codeSnippetText : item.structuredSnippetText,
+                monospaced: true,
+                lineLimit: snippetPreviewLineLimit
+            )
                 .padding(.top, 12)
 
             Spacer(minLength: 0)
@@ -419,11 +394,6 @@ struct ClipCardView: View {
                 Image(nsImage: filePreviewImage)
                     .resizable()
                     .scaledToFill()
-            } else if let filePreviewIcon {
-                Image(nsImage: filePreviewIcon)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 58, height: 58)
             } else {
                 Image(systemName: "doc")
                     .font(.system(size: 24, weight: .semibold))
@@ -460,7 +430,13 @@ struct ClipCardView: View {
 
     @ViewBuilder
     private var richTextPreview: some View {
-        if let attributed = richTextAttributedPreview, !attributed.characters.isEmpty {
+        if isLightweightRendering {
+            Text(item.previewText.isEmpty ? "(empty)" : item.previewText)
+                .font(.system(size: 13.5, weight: .regular, design: .rounded))
+                .foregroundStyle(.white.opacity(0.74))
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else if let attributed = richTextAttributedPreview, !attributed.characters.isEmpty {
             Text(attributed)
                 .font(.system(size: 13.5, weight: .regular, design: .rounded))
                 .foregroundStyle(.white.opacity(0.74))
@@ -476,62 +452,13 @@ struct ClipCardView: View {
     }
 
     private var richTextAttributedPreview: AttributedString? {
-        let cacheKey = item.dedupeKey as NSString
-        if let cached = Self.richTextPreviewCache.object(forKey: cacheKey) {
-            return AttributedString(cached)
-        }
-
-        guard let parsed = parsedRichTextPreview else {
-            return nil
-        }
-
-        let sanitized = sanitizedRichText(parsed)
-        Self.richTextPreviewCache.setObject(sanitized, forKey: cacheKey)
-        return AttributedString(sanitized)
+        guard !isLightweightRendering else { return nil }
+        guard let parsed = parsedRichTextPreview else { return nil }
+        return AttributedString(parsed)
     }
 
     private var parsedRichTextPreview: NSAttributedString? {
-        if let rtfData = item.rtfData,
-           let attributed = try? NSAttributedString(
-               data: rtfData,
-               options: [.documentType: NSAttributedString.DocumentType.rtf],
-               documentAttributes: nil
-           ) {
-            return attributed
-        }
-
-        if let htmlContent = item.htmlContent,
-           let htmlData = htmlContent.data(using: .utf8),
-           let attributed = try? NSAttributedString(
-               data: htmlData,
-               options: [
-                   .documentType: NSAttributedString.DocumentType.html,
-                   .characterEncoding: String.Encoding.utf8.rawValue
-               ],
-               documentAttributes: nil
-           ) {
-            return attributed
-        }
-
-        return nil
-    }
-
-    private func sanitizedRichText(_ attributed: NSAttributedString) -> NSAttributedString {
-        let mutable = NSMutableAttributedString(attributedString: attributed)
-        let fullRange = NSRange(location: 0, length: mutable.length)
-        var attachmentRanges: [NSRange] = []
-
-        mutable.enumerateAttribute(.attachment, in: fullRange) { value, range, _ in
-            if value != nil {
-                attachmentRanges.append(range)
-            }
-        }
-
-        for range in attachmentRanges.reversed() {
-            mutable.replaceCharacters(in: range, with: " ")
-        }
-
-        return mutable
+        richTextPreviewSource
     }
 
     private func footer(showCharacterCount: Bool) -> some View {
@@ -558,55 +485,19 @@ struct ClipCardView: View {
         }
     }
 
-    private var imagePreview: NSImage? {
-        let cacheKey = item.dedupeKey as NSString
-        if let cached = Self.imagePreviewCache.object(forKey: cacheKey) {
-            return cached
-        }
-
-        guard let payloadData = item.payloadData, let decoded = NSImage(data: payloadData) else {
-            return nil
-        }
-
-        Self.imagePreviewCache.setObject(decoded, forKey: cacheKey)
-        return decoded
-    }
-
     private var firstFilePath: String? {
         item.filePaths.first
     }
 
-    private var filePreviewImage: NSImage? {
-        guard let firstFilePath else { return nil }
-        if let cached = filePreviewStore.preview(for: firstFilePath) {
-            return cached
-        }
-
-        let cacheKey = firstFilePath as NSString
-        if let cached = Self.fileImageFallbackCache.object(forKey: cacheKey) {
-            return cached
-        }
-
-        guard let loaded = NSImage(contentsOfFile: firstFilePath) else {
-            return nil
-        }
-
-        Self.fileImageFallbackCache.setObject(loaded, forKey: cacheKey)
-        return loaded
+    private var imagePreview: NSImage? {
+        guard !isLightweightRendering else { return nil }
+        return resolvedImagePreview
     }
 
-    private var filePreviewIcon: NSImage? {
-        guard let firstFilePath else { return nil }
-        let cacheKey = firstFilePath as NSString
-        if let cached = Self.fileIconCache.object(forKey: cacheKey) {
-            return cached
-        }
-
-        let baseIcon = NSWorkspace.shared.icon(forFile: firstFilePath)
-        let icon = (baseIcon.copy() as? NSImage) ?? baseIcon
-        icon.size = NSSize(width: 58, height: 58)
-        Self.fileIconCache.setObject(icon, forKey: cacheKey)
-        return icon
+    private var filePreviewImage: NSImage? {
+        guard !isLightweightRendering else { return nil }
+        guard firstFilePath != nil else { return nil }
+        return resolvedFilePreviewImage
     }
 
     private var fileTitle: String {
@@ -627,58 +518,9 @@ struct ClipCardView: View {
         return firstFilePath
     }
 
-    private var codeSnippetText: String {
-        let cacheKey = item.dedupeKey as NSString
-        if let cached = Self.codeSnippetCache.object(forKey: cacheKey) {
-            return cached as String
-        }
-        let snippet = item.content
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .prefix(6)
-            .joined(separator: "\n")
-        Self.codeSnippetCache.setObject(snippet as NSString, forKey: cacheKey)
-        return snippet
-    }
-
-    private var structuredSnippetText: String {
-        guard let format = item.structuredFormat else {
-            return codeSnippetText
-        }
-
-        switch format {
-        case .json:
-            return prettyPrintedJSONSnippet ?? codeSnippetText
-        case .xml, .csv:
-            return codeSnippetText
-        }
-    }
-
-    private var prettyPrintedJSONSnippet: String? {
-        let cacheKey = item.dedupeKey as NSString
-        if let cached = Self.jsonSnippetCache.object(forKey: cacheKey) {
-            return cached as String
-        }
-
-        guard let data = item.content.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data, options: []),
-              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted]),
-              let prettyString = String(data: pretty, encoding: .utf8) else {
-            return nil
-        }
-
-        let snippet = prettyString
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .prefix(6)
-            .joined(separator: "\n")
-
-        Self.jsonSnippetCache.setObject(snippet as NSString, forKey: cacheKey)
-        return snippet
-    }
-
     private var linkPreview: LinkPreviewData? {
-        guard let linkURL = item.linkURL else { return nil }
-        return linkPreviewStore.preview(for: linkURL)
+        guard !isLightweightRendering else { return nil }
+        return linkPreviewData
     }
 
     private var linkTitle: String {

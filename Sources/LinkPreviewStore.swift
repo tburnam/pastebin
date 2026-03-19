@@ -25,7 +25,7 @@ final class LinkPreviewStore: ObservableObject {
     private var inFlightURLs: Set<URL> = []
     private var activeProviders: [URL: LPMetadataProvider] = [:]
     private let metadataTimeout: TimeInterval = 5
-    private var hasScheduledChangeNotification = false
+    private var changeObservers: [UUID: (URL) -> Void] = [:]
 
     func preview(for url: URL) -> LinkPreviewData? {
         cachedData.object(forKey: url as NSURL)?.value
@@ -59,6 +59,17 @@ final class LinkPreviewStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func addChangeObserver(_ observer: @escaping (URL) -> Void) -> UUID {
+        let token = UUID()
+        changeObservers[token] = observer
+        return token
+    }
+
+    func removeChangeObserver(_ token: UUID) {
+        changeObservers[token] = nil
+    }
+
     private func complete(url: URL, title: String?, image: NSImage?) {
         let normalizedTitle = title.flatMap { $0.isEmpty ? nil : $0 }
         cachedData.setObject(
@@ -67,17 +78,8 @@ final class LinkPreviewStore: ObservableObject {
         )
         inFlightURLs.remove(url)
         activeProviders[url] = nil
-        scheduleChangeNotification()
-    }
-
-    private func scheduleChangeNotification() {
-        guard !hasScheduledChangeNotification else { return }
-        hasScheduledChangeNotification = true
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.hasScheduledChangeNotification = false
-            self.objectWillChange.send()
+        for observer in changeObservers.values {
+            observer(url)
         }
     }
 

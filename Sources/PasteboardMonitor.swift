@@ -96,7 +96,7 @@ final class PasteboardMonitor {
 
         let filePaths = fileURLs.map(\.path)
         let content = filePaths.joined(separator: "\n")
-        let seed = Data(filePaths.joined(separator: "|").utf8)
+        let seed = ClipboardContentLimits.dedupeSeed(forText: filePaths.joined(separator: "|"))
 
         return CapturedClipboardItem(
             content: content,
@@ -112,6 +112,16 @@ final class PasteboardMonitor {
 
         let width = max(1, Int(image.size.width.rounded()))
         let height = max(1, Int(image.size.height.rounded()))
+        let payloadSize = payloadData.count
+
+        if payloadSize > ClipboardContentLimits.maxImagePayloadBytes {
+            let description = "[Large image clip skipped: \(width)x\(height), \(ClipboardContentLimits.byteCountLabel(payloadSize)) exceeds \(ClipboardContentLimits.byteCountLabel(ClipboardContentLimits.maxImagePayloadBytes)) limit]"
+            return CapturedClipboardItem(
+                content: description,
+                contentTypeRaw: "text",
+                dedupeKey: dedupeKey(prefix: "image_skipped", from: ClipboardContentLimits.dedupeSeed(forText: description))
+            )
+        }
 
         return CapturedClipboardItem(
             content: "[Image \(width)x\(height)]",
@@ -129,11 +139,25 @@ final class PasteboardMonitor {
         var rtfData: Data?
         var htmlContent: String?
         var didLoadRichPayloads = false
+        var oversizedRichPayloads: [String] = []
 
         func loadRichPayloadsIfNeeded() {
             guard !didLoadRichPayloads else { return }
-            rtfData = pasteboard.data(forType: .rtf)
-            htmlContent = pasteboard.string(forType: .html)
+            if let rawRTFData = pasteboard.data(forType: .rtf) {
+                if rawRTFData.count <= ClipboardContentLimits.maxRichPayloadBytes {
+                    rtfData = rawRTFData
+                } else {
+                    oversizedRichPayloads.append("RTF \(ClipboardContentLimits.byteCountLabel(rawRTFData.count))")
+                }
+            }
+            if let rawHTMLContent = pasteboard.string(forType: .html) {
+                let htmlByteCount = rawHTMLContent.utf8.count
+                if htmlByteCount <= ClipboardContentLimits.maxRichPayloadBytes {
+                    htmlContent = rawHTMLContent
+                } else {
+                    oversizedRichPayloads.append("HTML \(ClipboardContentLimits.byteCountLabel(htmlByteCount))")
+                }
+            }
             didLoadRichPayloads = true
         }
 
@@ -170,7 +194,10 @@ final class PasteboardMonitor {
                     content: linkURL.absoluteString,
                     contentTypeRaw: "link",
                     linkURL: linkURL.absoluteString,
-                    dedupeKey: dedupeKey(prefix: "link", from: Data(linkURL.absoluteString.utf8))
+                    dedupeKey: dedupeKey(
+                        prefix: "link",
+                        from: ClipboardContentLimits.dedupeSeed(forText: linkURL.absoluteString)
+                    )
                 )
             }
 
@@ -186,11 +213,21 @@ final class PasteboardMonitor {
                     dedupeKey: dedupeKey(prefix: "rich", from: richDedupeSeed(rtfData: rtfData, htmlContent: htmlContent, content: content))
                 )
             }
+
+            if !oversizedRichPayloads.isEmpty {
+                let message = "[Large rich text clip skipped: \(oversizedRichPayloads.joined(separator: ", "))]"
+                return CapturedClipboardItem(
+                    content: message,
+                    contentTypeRaw: "text",
+                    dedupeKey: dedupeKey(prefix: "rich_skipped", from: ClipboardContentLimits.dedupeSeed(forText: message))
+                )
+            }
             return nil
         }
 
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        let cappedCandidate = candidate
 
         let linkURL = clipboardLinkURL()
         let resolvedLinkURL = linkURL ?? standaloneWebURL(from: trimmed)
@@ -207,26 +244,35 @@ final class PasteboardMonitor {
                 content: resolvedContent,
                 contentTypeRaw: "link",
                 linkURL: resolvedLinkURL.absoluteString,
-                dedupeKey: dedupeKey(prefix: "link", from: Data(resolvedLinkURL.absoluteString.utf8))
+                dedupeKey: dedupeKey(
+                    prefix: "link",
+                    from: ClipboardContentLimits.dedupeSeed(forText: resolvedLinkURL.absoluteString)
+                )
             )
         }
 
         if let structuredFormat = structuredFormat(from: typeIdentifiers) {
             return CapturedClipboardItem(
-                content: candidate,
+                content: cappedCandidate,
                 contentTypeRaw: "structured",
                 structuredFormatRaw: structuredFormat.rawValue,
-                dedupeKey: dedupeKey(prefix: "structured", from: Data((structuredFormat.rawValue + "|" + candidate).utf8))
+                dedupeKey: dedupeKey(
+                    prefix: "structured",
+                    from: ClipboardContentLimits.dedupeSeed(forText: structuredFormat.rawValue + "|" + cappedCandidate)
+                )
             )
         }
 
         if isSystemSourceCodeType(typeIdentifiers) {
             let codeLanguage = codeLanguage(from: typeIdentifiers)
             return CapturedClipboardItem(
-                content: candidate,
+                content: cappedCandidate,
                 contentTypeRaw: "code",
                 codeLanguage: codeLanguage,
-                dedupeKey: dedupeKey(prefix: "code", from: Data(((codeLanguage ?? "unknown") + "|" + candidate).utf8))
+                dedupeKey: dedupeKey(
+                    prefix: "code",
+                    from: ClipboardContentLimits.dedupeSeed(forText: (codeLanguage ?? "unknown") + "|" + cappedCandidate)
+                )
             )
         }
 
@@ -236,23 +282,24 @@ final class PasteboardMonitor {
             let richContent = resolvedRichText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
                 ? resolvedRichText!
                 : candidate
+            let cappedRichContent = richContent
 
             return CapturedClipboardItem(
-                content: richContent,
+                content: cappedRichContent,
                 contentTypeRaw: "rich_text",
                 rtfData: rtfData,
                 htmlContent: htmlContent,
                 dedupeKey: dedupeKey(
                     prefix: "rich",
-                    from: richDedupeSeed(rtfData: rtfData, htmlContent: htmlContent, content: richContent)
+                    from: richDedupeSeed(rtfData: rtfData, htmlContent: htmlContent, content: cappedRichContent)
                 )
             )
         }
 
         return CapturedClipboardItem(
-            content: candidate,
+            content: cappedCandidate,
             contentTypeRaw: "text",
-            dedupeKey: dedupeKey(prefix: "text", from: Data(candidate.utf8))
+            dedupeKey: dedupeKey(prefix: "text", from: ClipboardContentLimits.dedupeSeed(forText: cappedCandidate))
         )
     }
 
@@ -393,6 +440,7 @@ final class PasteboardMonitor {
 
     private func plainTextFromRTF(_ rtfData: Data?) -> String? {
         guard let rtfData else { return nil }
+        guard rtfData.count <= ClipboardContentLimits.maxRichPayloadBytes else { return nil }
         guard let attributed = try? NSAttributedString(
             data: rtfData,
             options: [.documentType: NSAttributedString.DocumentType.rtf],
@@ -404,7 +452,9 @@ final class PasteboardMonitor {
     }
 
     private func plainTextFromHTML(_ html: String?) -> String? {
-        guard let html, let data = html.data(using: .utf8) else { return nil }
+        guard let html else { return nil }
+        guard html.utf8.count <= ClipboardContentLimits.maxRichPayloadBytes else { return nil }
+        guard let data = html.data(using: .utf8) else { return nil }
         guard let attributed = try? NSAttributedString(
             data: data,
             options: [
@@ -421,13 +471,14 @@ final class PasteboardMonitor {
     private func richDedupeSeed(rtfData: Data?, htmlContent: String?, content: String) -> Data {
         var seed = Data()
         if let rtfData {
-            seed.append(rtfData)
+            seed.append(rtfData.prefix(ClipboardContentLimits.maxDedupeSeedUTF8Bytes))
+            seed.append(contentsOf: Data("|rtf_bytes:\(rtfData.count)".utf8))
         }
         if let htmlContent {
-            seed.append(Data(htmlContent.utf8))
+            seed.append(ClipboardContentLimits.dedupeSeed(forText: htmlContent))
         }
         if seed.isEmpty {
-            seed.append(Data(content.utf8))
+            seed.append(ClipboardContentLimits.dedupeSeed(forText: content))
         }
         return seed
     }
