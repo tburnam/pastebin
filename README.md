@@ -14,7 +14,7 @@ A SwiftUI + AppKit menu-bar app that captures clipboard history into SQLite and 
   - `Enter` to copy selected item and close
   - `Cmd+1...Cmd+9` to instantly pick first 9 results
   - Type to fuzzy-search instantly
-  - `Backspace` to remove query chars
+  - `Backspace` edits the query while search is focused, and deletes the selected item after arrow-key navigation
   - `Esc` clears query (or closes when query is empty)
 
 ## Requirements
@@ -53,6 +53,8 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./release.sh
 ## Install
 
 Open the generated DMG and drag `PasteBin.app` into `Applications`.
+
+If you share an ad hoc signed build with a teammate, the cleanest internal handoff is the DMG in `dist/`. If Gatekeeper blocks the first launch, have them Control-click `PasteBin.app`, choose `Open`, and confirm once.
 
 ## Notes
 

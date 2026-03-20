@@ -12,7 +12,9 @@ DIST_DIR="dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
 ICON_ICNS="${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+STATUS_BAR_SOURCE_PNG="${APP_BUNDLE}/Contents/Resources/StatusBarSource.png"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
+LATEST_DMG_PATH="${DIST_DIR}/${APP_NAME}-latest.dmg"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -139,6 +141,7 @@ ditto "$latest_build" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 generate_icns "$ICON_PNG" "$ICON_ICNS"
+ditto "$ICON_PNG" "$STATUS_BAR_SOURCE_PNG"
 
 cat > "$INFO_PLIST" <<EOF_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -183,7 +186,8 @@ sign_app_if_configured
 dmg_path="${DIST_DIR}/${APP_NAME}-${build_stamp}.dmg"
 dmg_staging="$(mktemp -d)"
 trap 'rm -rf "$dmg_staging"' EXIT
-rm -f "$dmg_path" "$ZIP_PATH"
+rm -f "$dmg_path" "$ZIP_PATH" "$LATEST_DMG_PATH"
+find "$DIST_DIR" -maxdepth 1 -type f -name "${APP_NAME}-*.dmg" ! -name "${APP_NAME}-latest.dmg" -delete
 find "$DIST_DIR" -maxdepth 1 -type f -name "rw.*.${APP_NAME}-*.dmg" -delete
 ditto "$APP_BUNDLE" "${dmg_staging}/${APP_NAME}.app"
 
@@ -201,8 +205,10 @@ create-dmg \
   "$dmg_staging"
 
 ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+ditto "$dmg_path" "$LATEST_DMG_PATH"
 
 echo "Latest build: $latest_build"
 echo "App bundle: ${APP_BUNDLE}"
 echo "ZIP: ${ZIP_PATH}"
 echo "DMG: ${dmg_path}"
+echo "Latest DMG Alias: ${LATEST_DMG_PATH}"

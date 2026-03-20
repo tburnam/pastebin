@@ -1239,7 +1239,7 @@ private final class ClipStripInteractionOverlayView: NSView {
             hasStartedDrag = true
         }
 
-        onDragChanged?(location)
+        onDragChanged?(callbackLocation(for: event))
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1249,7 +1249,19 @@ private final class ClipStripInteractionOverlayView: NSView {
         }
 
         guard hasStartedDrag else { return }
-        onDragEnded?(event.locationInWindow)
+        onDragEnded?(callbackLocation(for: event))
+    }
+
+    private func callbackLocation(for event: NSEvent) -> CGPoint {
+        let location = event.locationInWindow
+        guard let contentView = window?.contentView else {
+            return location
+        }
+
+        return CGPoint(
+            x: location.x,
+            y: contentView.bounds.height - location.y
+        )
     }
 }
 

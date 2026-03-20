@@ -2,32 +2,42 @@ import AppKit
 import CoreGraphics
 
 enum StatusBarIconRenderer {
-    private static let analysisSize = 256
-    private static let rasterSize = 72
-    private static let brightnessCutoff = 24
-    private static let alphaCutoff = 8
+    private static let analysisSize = 384
+    private static let brightnessCutoff = 56
+    private static let alphaCutoff = 12
+    private static let logicalHeight: CGFloat = 17
+    private static let rasterScale: CGFloat = 2
 
     static func makeMenuBarImage(sideLength: CGFloat) -> NSImage? {
+        if let logoImage = makeLogoTemplateImage(sideLength: sideLength) {
+            return logoImage
+        }
+
+        return makeFallbackMonogramImage(sideLength: sideLength)
+    }
+
+    private static func makeLogoTemplateImage(sideLength: CGFloat) -> NSImage? {
         guard let sourceImage = sourceImage(),
               let cgImage = cgImage(from: sourceImage),
-              let processed = makeTemplateGlyph(from: cgImage) else {
+              let templateImage = makeTemplateGlyph(from: cgImage) else {
             return nil
         }
 
-        let image = NSImage(cgImage: processed, size: NSSize(width: sideLength, height: sideLength))
+        let outputHeight = max(logicalHeight, sideLength.rounded(.up))
+        let scale = outputHeight / CGFloat(templateImage.height)
+        let outputWidth = CGFloat(templateImage.width) * scale
+
+        let image = NSImage(
+            cgImage: templateImage,
+            size: NSSize(width: outputWidth, height: outputHeight)
+        )
         image.isTemplate = true
         return image
     }
 
     private static func sourceImage() -> NSImage? {
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let image = NSImage(contentsOf: iconURL) {
-            return image
-        }
-
-        if Bundle.main.bundleURL.pathExtension == "app" {
-            let image = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
-            image.size = NSSize(width: analysisSize, height: analysisSize)
+        if let bundledPNG = Bundle.main.url(forResource: "StatusBarSource", withExtension: "png"),
+           let image = NSImage(contentsOf: bundledPNG) {
             return image
         }
 
@@ -61,94 +71,64 @@ enum StatusBarIconRenderer {
     }
 
     private static func makeTemplateGlyph(from source: CGImage) -> CGImage? {
-        guard let analysisContext = rgbaContext(width: analysisSize, height: analysisSize) else {
+        guard let analysisRep = scaledBitmapRep(from: source, width: analysisSize, height: analysisSize),
+              let extracted = extractMask(from: analysisRep) else {
+            return nil
+        }
+        let canvasHeight = Int((max(logicalHeight, 16) * rasterScale).rounded(.up))
+        let availableHeight = CGFloat(canvasHeight) * 0.78
+        let scale = availableHeight / CGFloat(extracted.height)
+        let canvasWidth = Int((CGFloat(extracted.width) * scale + CGFloat(canvasHeight) * 0.18).rounded(.up))
+
+        guard let outputContext = rgbaContext(width: canvasWidth, height: canvasHeight) else {
             return nil
         }
 
-        analysisContext.interpolationQuality = .high
-        analysisContext.draw(
-            source,
-            in: CGRect(x: 0, y: 0, width: analysisSize, height: analysisSize)
-        )
-
-        guard let bounds = brightPixelBounds(in: analysisContext, width: analysisSize, height: analysisSize) else {
-            return nil
-        }
-
-        let expandedBounds = bounds.insetBy(dx: -10, dy: -10)
-            .intersection(CGRect(x: 0, y: 0, width: analysisSize, height: analysisSize))
-            .integral
-        guard expandedBounds.width > 0, expandedBounds.height > 0 else {
-            return nil
-        }
-
-        let cropWidth = Int(expandedBounds.width)
-        let cropHeight = Int(expandedBounds.height)
-        guard let cropContext = rgbaContext(width: cropWidth, height: cropHeight),
-              let analysisData = analysisContext.data,
-              let cropData = cropContext.data else {
-            return nil
-        }
-
-        let sourceBytes = analysisData.bindMemory(to: UInt8.self, capacity: analysisSize * analysisSize * 4)
-        let outputBytes = cropData.bindMemory(to: UInt8.self, capacity: cropWidth * cropHeight * 4)
-
-        for y in 0..<cropHeight {
-            for x in 0..<cropWidth {
-                let sourceX = Int(expandedBounds.minX) + x
-                let sourceY = Int(expandedBounds.minY) + y
-                let sourceOffset = ((sourceY * analysisSize) + sourceX) * 4
-                let outputOffset = ((y * cropWidth) + x) * 4
-
-                let red = Int(sourceBytes[sourceOffset])
-                let green = Int(sourceBytes[sourceOffset + 1])
-                let blue = Int(sourceBytes[sourceOffset + 2])
-                let alpha = Int(sourceBytes[sourceOffset + 3])
-
-                let brightness = luminance(red: red, green: green, blue: blue)
-                let normalizedBrightness = max(0, brightness - brightnessCutoff)
-                let normalizedAlpha = max(0, alpha - alphaCutoff)
-                let combinedAlpha = min(
-                    255,
-                    Int(Double(normalizedBrightness) / Double(255 - brightnessCutoff) * 255.0)
-                        * normalizedAlpha / 255
-                )
-
-                outputBytes[outputOffset] = 255
-                outputBytes[outputOffset + 1] = 255
-                outputBytes[outputOffset + 2] = 255
-                outputBytes[outputOffset + 3] = UInt8(max(0, min(255, combinedAlpha)))
-            }
-        }
-
-        guard let croppedGlyph = cropContext.makeImage(),
-              let outputContext = rgbaContext(width: rasterSize, height: rasterSize) else {
-            return nil
-        }
-
-        outputContext.clear(CGRect(x: 0, y: 0, width: rasterSize, height: rasterSize))
+        outputContext.clear(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
         outputContext.interpolationQuality = .high
 
-        let padding = CGFloat(rasterSize) * 0.10
-        let availableRect = CGRect(
-            x: padding,
-            y: padding,
-            width: CGFloat(rasterSize) - (padding * 2),
-            height: CGFloat(rasterSize) - (padding * 2)
+        let targetSize = CGSize(
+            width: CGFloat(extracted.width) * scale,
+            height: CGFloat(extracted.height) * scale
         )
-        let drawRect = aspectFitRect(
-            sourceSize: CGSize(width: cropWidth, height: cropHeight),
-            inside: availableRect
+        let drawRect = CGRect(
+            x: CGFloat(canvasWidth) * 0.09,
+            y: (CGFloat(canvasHeight) - targetSize.height) / 2,
+            width: targetSize.width,
+            height: targetSize.height
         )
-        outputContext.draw(croppedGlyph, in: drawRect)
+        outputContext.saveGState()
+        outputContext.clip(to: drawRect, mask: extracted.mask)
+        outputContext.setFillColor(NSColor.white.cgColor)
+        outputContext.fill(drawRect)
+        outputContext.restoreGState()
 
         return outputContext.makeImage()
     }
 
-    private static func brightPixelBounds(in context: CGContext, width: Int, height: Int) -> CGRect? {
-        guard let data = context.data else { return nil }
-        let bytes = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+    private static func scaledBitmapRep(from source: CGImage, width: Int, height: Int) -> NSBitmapImageRep? {
+        guard let context = rgbaContext(width: width, height: height) else {
+            return nil
+        }
 
+        context.interpolationQuality = .high
+        context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        guard let scaledImage = context.makeImage() else {
+            return nil
+        }
+
+        let rep = NSBitmapImageRep(cgImage: scaledImage)
+        rep.size = NSSize(width: width, height: height)
+        return rep
+    }
+
+    private static func extractMask(from rep: NSBitmapImageRep) -> (mask: CGImage, width: Int, height: Int)? {
+        let width = rep.pixelsWide
+        let height = rep.pixelsHigh
+        guard width > 0, height > 0 else { return nil }
+
+        var alphaByPixel = [UInt8](repeating: 0, count: width * height)
         var minX = width
         var minY = height
         var maxX = -1
@@ -156,15 +136,17 @@ enum StatusBarIconRenderer {
 
         for y in 0..<height {
             for x in 0..<width {
-                let offset = ((y * width) + x) * 4
-                let red = Int(bytes[offset])
-                let green = Int(bytes[offset + 1])
-                let blue = Int(bytes[offset + 2])
-                let alpha = Int(bytes[offset + 3])
+                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let brightness = max(color.redComponent, max(color.greenComponent, color.blueComponent)) * 255.0
+                let normalizedBrightness = max(0.0, brightness - Double(brightnessCutoff))
+                let alphaFactor = pow(
+                    normalizedBrightness / Double(255 - brightnessCutoff),
+                    1.15
+                )
+                let alpha = UInt8(max(0, min(255, Int(alphaFactor * 255.0))))
+                alphaByPixel[(y * width) + x] = alpha
 
                 guard alpha > alphaCutoff else { continue }
-                guard luminance(red: red, green: green, blue: blue) > brightnessCutoff else { continue }
-
                 minX = min(minX, x)
                 minY = min(minY, y)
                 maxX = max(maxX, x)
@@ -176,29 +158,40 @@ enum StatusBarIconRenderer {
             return nil
         }
 
-        return CGRect(
-            x: minX,
-            y: minY,
-            width: (maxX - minX) + 1,
-            height: (maxY - minY) + 1
-        )
-    }
+        let expandedMinX = max(0, minX - 18)
+        let expandedMinY = max(0, minY - 18)
+        let expandedMaxX = min(width - 1, maxX + 18)
+        let expandedMaxY = min(height - 1, maxY + 18)
+        let cropWidth = expandedMaxX - expandedMinX + 1
+        let cropHeight = expandedMaxY - expandedMinY + 1
 
-    private static func aspectFitRect(sourceSize: CGSize, inside bounds: CGRect) -> CGRect {
-        guard sourceSize.width > 0, sourceSize.height > 0 else { return bounds }
+        var maskData = Data(count: cropWidth * cropHeight)
+        maskData.withUnsafeMutableBytes { rawBuffer in
+            guard let bytes = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+            for y in 0..<cropHeight {
+                for x in 0..<cropWidth {
+                    let sourceX = expandedMinX + x
+                    let sourceY = expandedMinY + y
+                    bytes[(y * cropWidth) + x] = 255 - alphaByPixel[(sourceY * width) + sourceX]
+                }
+            }
+        }
 
-        let scale = min(bounds.width / sourceSize.width, bounds.height / sourceSize.height)
-        let fittedSize = CGSize(
-            width: sourceSize.width * scale,
-            height: sourceSize.height * scale
-        )
+        guard let provider = CGDataProvider(data: maskData as CFData),
+              let mask = CGImage(
+                maskWidth: cropWidth,
+                height: cropHeight,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: cropWidth,
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true
+              ) else {
+            return nil
+        }
 
-        return CGRect(
-            x: bounds.midX - (fittedSize.width / 2),
-            y: bounds.midY - (fittedSize.height / 2),
-            width: fittedSize.width,
-            height: fittedSize.height
-        )
+        return (mask, cropWidth, cropHeight)
     }
 
     private static func rgbaContext(width: Int, height: Int) -> CGContext? {
@@ -217,7 +210,121 @@ enum StatusBarIconRenderer {
         )
     }
 
-    private static func luminance(red: Int, green: Int, blue: Int) -> Int {
-        (red * 2126 + green * 7152 + blue * 722) / 10_000
+    private static func makeFallbackMonogramImage(sideLength: CGFloat) -> NSImage? {
+        let height = max(14, sideLength.rounded(.up))
+        let size = NSSize(
+            width: (height * 1.18).rounded(.up),
+            height: height
+        )
+
+        let image = NSImage(size: size, flipped: false) { rect in
+            drawFallbackMonogram(in: rect)
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    private static func drawFallbackMonogram(in rect: CGRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+
+        context.saveGState()
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+        context.clear(rect)
+
+        let bounds = rect.insetBy(dx: rect.width * 0.04, dy: rect.height * 0.06)
+        let strokeWidth = bounds.height * 0.24
+        let loopDiameter = bounds.height * 0.48
+        let holeDiameter = bounds.height * 0.19
+
+        NSColor.white.setFill()
+        NSColor.white.setStroke()
+
+        NSBezierPath(
+            roundedRect: CGRect(
+                x: bounds.minX + bounds.width * 0.08,
+                y: bounds.minY + bounds.height * 0.04,
+                width: strokeWidth,
+                height: bounds.height * 0.88
+            ),
+            xRadius: strokeWidth / 2,
+            yRadius: strokeWidth / 2
+        ).fill()
+
+        NSBezierPath(
+            roundedRect: CGRect(
+                x: bounds.minX + bounds.width * 0.45,
+                y: bounds.minY + bounds.height * 0.42,
+                width: strokeWidth,
+                height: bounds.height * 0.50
+            ),
+            xRadius: strokeWidth / 2,
+            yRadius: strokeWidth / 2
+        ).fill()
+
+        let leftLoopRect = CGRect(
+            x: bounds.minX + bounds.width * 0.11,
+            y: bounds.minY + bounds.height * 0.39,
+            width: loopDiameter,
+            height: loopDiameter
+        )
+        NSBezierPath(ovalIn: leftLoopRect).fill()
+
+        let rightLoopRect = CGRect(
+            x: bounds.minX + bounds.width * 0.50,
+            y: bounds.minY + bounds.height * 0.23,
+            width: loopDiameter,
+            height: loopDiameter
+        )
+        NSBezierPath(ovalIn: rightLoopRect).fill()
+
+        let bridge = NSBezierPath()
+        bridge.lineWidth = strokeWidth * 0.98
+        bridge.lineCapStyle = .round
+        bridge.lineJoinStyle = .round
+        bridge.move(
+            to: CGPoint(
+                x: leftLoopRect.midX + bounds.height * 0.08,
+                y: leftLoopRect.midY + bounds.height * 0.03
+            )
+        )
+        bridge.curve(
+            to: CGPoint(
+                x: rightLoopRect.midX - bounds.height * 0.08,
+                y: rightLoopRect.midY + bounds.height * 0.12
+            ),
+            controlPoint1: CGPoint(
+                x: bounds.minX + bounds.width * 0.44,
+                y: bounds.minY + bounds.height * 0.60
+            ),
+            controlPoint2: CGPoint(
+                x: bounds.minX + bounds.width * 0.58,
+                y: bounds.minY + bounds.height * 0.36
+            )
+        )
+        bridge.stroke()
+
+        context.setBlendMode(.clear)
+
+        NSBezierPath(
+            ovalIn: CGRect(
+                x: leftLoopRect.midX - holeDiameter / 2,
+                y: leftLoopRect.midY - holeDiameter / 2,
+                width: holeDiameter,
+                height: holeDiameter
+            )
+        ).fill()
+
+        NSBezierPath(
+            ovalIn: CGRect(
+                x: rightLoopRect.midX - holeDiameter / 2,
+                y: rightLoopRect.midY - holeDiameter / 2,
+                width: holeDiameter,
+                height: holeDiameter
+            )
+        ).fill()
+
+        context.restoreGState()
     }
 }

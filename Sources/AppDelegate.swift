@@ -164,14 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         if let button = statusItem.button {
-            let iconSideLength: CGFloat = 14
+            let iconSideLength: CGFloat = 16
 
             if let image = StatusBarIconRenderer.makeMenuBarImage(sideLength: iconSideLength)
                 ?? NSImage(systemSymbolName: "doc.on.clipboard", accessibilityDescription: "PasteBin")
                 ?? NSImage(systemSymbolName: "clipboard", accessibilityDescription: "PasteBin") {
                 button.image = image
                 button.imagePosition = .imageOnly
-                button.imageScaling = .scaleProportionallyDown
+                button.imageScaling = .scaleNone
                 button.title = ""
             } else {
                 // Keep a visible target in the menu bar even if symbol lookup fails.

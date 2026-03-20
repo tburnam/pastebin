@@ -8,6 +8,10 @@
 		<data>
 		+OWUZQ61kdhr8w2uBbZUbFtGyEw=
 		</data>
+		<key>Resources/StatusBarSource.png</key>
+		<data>
+		vmi0Ko+YXe2P7cg1PJWYl3sZQ+8=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -16,6 +20,13 @@
 			<key>hash2</key>
 			<data>
 			hsvH6iyYlMPXT/I7Ssg1A2eg5BmK3AoE1Adl1aINGyE=
+			</data>
+		</dict>
+		<key>Resources/StatusBarSource.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			eFjmfihUlQMsc3rwNDMLoJ6OYyNJY4ibndsicJXyEmE=
 			</data>
 		</dict>
 	</dict>
