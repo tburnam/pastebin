@@ -2,6 +2,8 @@
 
 A SwiftUI + AppKit menu-bar app that captures clipboard history into SQLite and presents a glass-style picker panel.
 
+<img width="1708" height="360" alt="Screenshot 2026-03-23 at 5 58 42 PM" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
+
 ## Features
 
 - Menu-bar icon with `Open` and `Quit`
