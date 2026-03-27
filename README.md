@@ -6,10 +6,8 @@ A SwiftUI + AppKit menu-bar app that captures clipboard history into SQLite and 
 
 ## Features
 
-- Menu-bar icon with `Open` and `Quit`
-- Clipboard monitoring with persistence in `~/Library/Application Support/PasteBin/clipboard.sqlite`
-- Bottom-up animated panel presentation
-- Glass-style translucent UI with card-based clipboard items
+- Stores all of your copied items to a sqlite database for easy reference and access.
+- Hotkey access paste stack (default: `⌥ and \`)
 - Per-card app icon and character count
 - Keyboard-first interaction:
   - `Left/Right` arrows to move selection
@@ -18,6 +16,8 @@ A SwiftUI + AppKit menu-bar app that captures clipboard history into SQLite and 
   - Type to fuzzy-search instantly
   - `Backspace` edits the query while search is focused, and deletes the selected item after arrow-key navigation
   - `Esc` clears query (or closes when query is empty)
+ 
+I built this becuase I paid for it for years, and there's no reason to pay for software like this anymore. 
 
 ## Requirements
 
