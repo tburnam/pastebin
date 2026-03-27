@@ -1,6 +1,6 @@
 # PasteBin (macOS menu-bar clipboard bin)
 
-A macOS menu-bar app to store, search, and access your clipboard history. All the data lives in a sqlite db on your machine.
+A macOS app to store, search, and access your clipboard history. All the data lives in a sqlite db on your machine.
 
 <img width="1708" height="360" alt="Screenshot 2026-03-23 at 5 58 42 PM" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
 
