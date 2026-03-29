@@ -34,6 +34,7 @@
 - Configurable hotkey to summon the paste stack (default `⌥` +  `\`)
 - Per-card app icon, character count, and content preview
 - Fast fuzzy search, keyboard-first navigation
+- Create buckets and drag/rename cards for quick access (like API keys, snippets, prompts)
 - macOS 14+
 
 I built this because I paid for one for years, and there's no reason to.
