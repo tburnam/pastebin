@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>PasteBin</title>
+    <link>https://github.com/tburnam/pastebin</link>
+    <item>
+      <title>PasteBin v0.2.0</title>
+      <pubDate>Sun, 29 Mar 2026 17:12:58 -0400</pubDate>
+      <sparkle:version>20260329141613</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/tburnam/pastebin/releases/download/v0.2.0/PasteBin.app.zip"
+        length="3184159"
+        type="application/octet-stream"
+        sparkle:edSignature="tFNGRdelzQ3jrMRJVbBIlbUGcIPCiEY2Ir8O2//4FydaQ0+INOj4oBHHj/SdB23TcMiSh+Cmb83azXFw08y+CA=="
+      />
+    </item>
+  </channel>
+</rss>
