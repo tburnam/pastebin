@@ -59,8 +59,10 @@ All data stays on your Mac. No network, no accounts, no telemetry.
 **Requirements:** macOS 14+, Xcode CLI Tools, Swift 6.2+
 
 ```bash
-swift run          # run from source
-swift test         # run tests
-./release.sh       # build, sign, notarize locally
-./release.sh --publish --minor   # ^ + GitHub release with version bump
+swift run    # run from source
+swift test   # run tests
 ```
+
+## Contributing
+
+PRs are welcome. Fork the repo, create a branch, and open a pull request. All PRs require passing CI (build + test) and approval before merging.
