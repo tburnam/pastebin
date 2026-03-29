@@ -13,6 +13,19 @@
   <a href="https://github.com/tburnam/pastebin/releases/latest/download/PasteBin-latest.dmg">
     <img src="https://img.shields.io/badge/Download-PasteBin.dmg-blue?style=for-the-badge&logo=apple" alt="Download PasteBin">
   </a>
+  <br><br>
+  <a href="https://github.com/tburnam/pastebin/releases/latest">
+    <img src="https://img.shields.io/github/v/release/tburnam/pastebin?label=latest&style=flat-square" alt="Latest Release">
+  </a>
+  <a href="https://github.com/tburnam/pastebin/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/tburnam/pastebin/build.yml?style=flat-square&label=build" alt="Build Status">
+  </a>
+  <a href="https://github.com/tburnam/pastebin/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/tburnam/pastebin/test.yml?style=flat-square&label=tests" alt="Test Status">
+  </a>
+  <a href="https://github.com/tburnam/pastebin/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/tburnam/pastebin?style=flat-square" alt="License">
+  </a>
 </p>
 
 <p align="center">
