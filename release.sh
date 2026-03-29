@@ -19,6 +19,7 @@ ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 LATEST_DMG_PATH="${DIST_DIR}/${APP_NAME}-latest.dmg"
 GITHUB_REPO="tburnam/pastebin"
 PUBLISH=false
+BUMP_TYPE=""
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -158,6 +159,12 @@ prompt_version() {
   current="$(get_latest_tag)"
   current="${current:-0.0.0}"
 
+  if [ -n "$BUMP_TYPE" ]; then
+    RELEASE_VERSION="$(bump_version "$current" "$BUMP_TYPE")"
+    echo "Will release as v${RELEASE_VERSION}"
+    return
+  fi
+
   local next_major next_minor next_patch
   next_major="$(bump_version "$current" major)"
   next_minor="$(bump_version "$current" minor)"
@@ -211,6 +218,9 @@ publish_to_github() {
 for arg in "$@"; do
   case "$arg" in
     --publish) PUBLISH=true ;;
+    --patch) BUMP_TYPE=patch ;;
+    --minor) BUMP_TYPE=minor ;;
+    --major) BUMP_TYPE=major ;;
   esac
 done
 
