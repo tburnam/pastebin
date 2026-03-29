@@ -204,7 +204,7 @@ publish_to_github() {
   git push origin "$tag"
 
   gh release create "$tag" \
-    "$dmg_path" \
+    "$LATEST_DMG_PATH#${APP_NAME}-latest.dmg" \
     "$ZIP_PATH" \
     --repo "$GITHUB_REPO" \
     --title "${APP_NAME} ${tag}" \

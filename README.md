@@ -1,64 +1,56 @@
-# PasteBin
+<p align="center">
+  <img src="pastebinicon.png" width="128" height="128" alt="PasteBin icon">
+</p>
 
-A macOS app to store, search, and access your clipboard history. All the data lives in a sqlite db on your machine.
+<h1 align="center">PasteBin</h1>
 
-<img width="1708" height="360" alt="Screenshot 2026-03-23 at 5 58 42 PM" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
+<p align="center">
+  A free, open-source clipboard manager for macOS.<br>
+  I built this because I paid for one for years, and there's no reason to.
+</p>
 
-[**Download the latest release**](https://github.com/tburnam/pastebin/releases/latest)
+<p align="center">
+  <a href="https://github.com/tburnam/pastebin/releases/latest/download/PasteBin-latest.dmg">
+    <img src="https://img.shields.io/badge/Download-PasteBin.dmg-blue?style=for-the-badge&logo=apple" alt="Download PasteBin">
+  </a>
+</p>
 
-1. Open the DMG and drag `PasteBin.app` into `Applications`.
-2. Launch `PasteBin.app`.
+<p align="center">
+  <img width="854" alt="PasteBin screenshot" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
+</p>
 
-All releases are signed and notarized by Apple — no Gatekeeper warnings.
+---
 
-I built this because I paid for a clipboard manager for years, and there's no reason to pay for software like this anymore.
-
-## Highlights
-
-- Stores all copied items to a local sqlite database for easy reference and access
-- Configurable hotkey to access paste stack (default: `⌥ and \`)
+- Stores every copied item in a local sqlite database
+- Configurable hotkey to summon the paste stack (default `⌥ \`)
 - Per-card app icon, character count, and content preview
-- Fast fuzzy search with keyboard-first navigation
+- Fast fuzzy search, keyboard-first navigation
 - macOS 14+
 
 ## Keyboard Shortcuts
 
-- `Left` / `Right`: move selection
-- `Enter`: copy the selected item and close
-- `Cmd+1` through `Cmd+9`: pick one of the first nine results
-- Type anywhere: search immediately
-- `Backspace`: edit the query while search is focused, or delete the selected item after arrow-key navigation
-- `Esc`: clear the query, or close the panel when the query is already empty
+| Key | Action |
+|-----|--------|
+| `Left` / `Right` | Move selection |
+| `Enter` | Copy selected item and close |
+| `Cmd+1` ... `Cmd+9` | Pick first 9 results |
+| Type anything | Fuzzy search |
+| `Backspace` | Edit query, or delete selected item |
+| `Esc` | Clear query, or close |
 
 ## Privacy
 
-All data stays on your Mac. Clipboard history is stored in `~/Library/Application Support/PasteBin/clipboard.sqlite`. No network, accounts, or API keys required.
+All data stays on your Mac. No network, no accounts, no telemetry.
+
+---
 
 ## Development
 
-### Requirements
-
-- macOS 14 or later
-- Xcode Command Line Tools or a full Xcode install
-- Swift 6.2+
-
-### Run From Source
+**Requirements:** macOS 14+, Xcode CLI Tools, Swift 6.2+
 
 ```bash
-swift run
+swift run          # run from source
+swift test         # run tests
+./release.sh       # build, sign, notarize locally
+./release.sh --publish --minor   # ^ + GitHub release with version bump
 ```
-
-### Test
-
-```bash
-swift test
-```
-
-### Release
-
-```bash
-./release.sh            # build, sign, notarize locally
-./release.sh --publish  # same + create GitHub release with version bump
-```
-
-The `--publish` flag prompts for a semver bump (patch/minor/major), tags, and uploads artifacts to GitHub Releases. Requires `create-dmg` (`brew install create-dmg`) and `gh`.
