@@ -18,6 +18,7 @@ STATUS_BAR_SOURCE_PNG="${APP_BUNDLE}/Contents/Resources/StatusBarSource.png"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 LATEST_DMG_PATH="${DIST_DIR}/${APP_NAME}-latest.dmg"
 GITHUB_REPO="tburnam/pastebin"
+SPARKLE_SIGN_UPDATE=".build/artifacts/sparkle/Sparkle/bin/sign_update"
 PUBLISH=false
 BUMP_TYPE=""
 
@@ -193,15 +194,61 @@ prompt_version() {
   echo "Will release as v${RELEASE_VERSION}"
 }
 
+generate_appcast() {
+  local tag="v${RELEASE_VERSION}"
+  local zip_size
+  local signature
+  local download_url
+
+  zip_size="$(stat -f '%z' "$ZIP_PATH")"
+  download_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${APP_NAME}.app.zip"
+
+  echo "Signing update with Sparkle EdDSA key..."
+  signature="$("${SPARKLE_SIGN_UPDATE}" "$ZIP_PATH" 2>&1 | grep 'sparkle:edSignature=' | sed 's/.*sparkle:edSignature="\([^"]*\)".*/\1/')"
+
+  if [ -z "$signature" ]; then
+    echo "Failed to generate Sparkle EdDSA signature." >&2
+    exit 1
+  fi
+
+  echo "Generating appcast.xml..."
+  cat > appcast.xml <<EOF_APPCAST
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>${APP_NAME}</title>
+    <link>https://github.com/${GITHUB_REPO}</link>
+    <item>
+      <title>${APP_NAME} ${tag}</title>
+      <pubDate>$(date -R)</pubDate>
+      <sparkle:version>${bundle_version}</sparkle:version>
+      <sparkle:shortVersionString>${RELEASE_VERSION}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>${MINIMUM_SYSTEM_VERSION}</sparkle:minimumSystemVersion>
+      <enclosure
+        url="${download_url}"
+        length="${zip_size}"
+        type="application/octet-stream"
+        sparkle:edSignature="${signature}"
+      />
+    </item>
+  </channel>
+</rss>
+EOF_APPCAST
+}
+
 publish_to_github() {
   need_cmd gh
 
   local tag="v${RELEASE_VERSION}"
 
+  generate_appcast
+
   echo ""
   echo "Creating GitHub release ${tag}..."
+  git add appcast.xml
+  git commit -m "Update appcast.xml for ${tag}"
   git tag "$tag"
-  git push origin "$tag"
+  git push origin main "$tag"
 
   gh release create "$tag" \
     "$LATEST_DMG_PATH#${APP_NAME}-latest.dmg" \
@@ -282,6 +329,15 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 generate_icns "$ICON_PNG" "$ICON_ICNS"
 ditto "$ICON_PNG" "$STATUS_BAR_SOURCE_PNG"
 
+# Embed Sparkle framework
+sparkle_framework="$(find .build/artifacts/sparkle -path '*/macos-*/Sparkle.framework' -maxdepth 5 | head -1)"
+if [ -n "$sparkle_framework" ]; then
+  echo "Embedding Sparkle.framework..."
+  mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+  ditto "$sparkle_framework" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+fi
+
 cat > "$INFO_PLIST" <<EOF_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -315,6 +371,10 @@ cat > "$INFO_PLIST" <<EOF_PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>SUFeedURL</key>
+  <string>https://raw.githubusercontent.com/${GITHUB_REPO}/main/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>ZptyKEaSdXTUK6ET98vBSwVDaU0I5V6a9pxL494+7U8=</string>
 </dict>
 </plist>
 EOF_PLIST
