@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="pastebinicon.png" width="128" height="128" alt="PasteBin icon">
+  <img src="icon_rounded.png" width="128" height="128" alt="PasteBin icon">
 </p>
 
 <h1 align="center">PasteBin</h1>
