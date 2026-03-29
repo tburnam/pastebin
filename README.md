@@ -27,9 +27,12 @@
 </p>
 
 ---
+## Features
+
+[Download](https://github.com/tburnam/pastebin/releases/latest/download/PasteBin-latest.dmg)
 
 - Stores every copied item in a local sqlite database
-- Configurable hotkey to summon the paste stack (default `⌥ \`)
+- Configurable hotkey to summon the paste stack (default `⌥` +  `\`)
 - Per-card app icon, character count, and content preview
 - Fast fuzzy search, keyboard-first navigation
 - macOS 14+
