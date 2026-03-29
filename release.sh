@@ -2,11 +2,13 @@
 set -euo pipefail
 
 APP_NAME="PasteBin"
-BUNDLE_ID="com.tylerburnam.pastebin"
+BUNDLE_ID="${BUNDLE_ID:-io.github.tylerburnam.pastebin}"
 ICON_PNG="pastebinicon.png"
 MINIMUM_SYSTEM_VERSION="14.0"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-release}"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Tyler Burnam (EZM2SRN8W6)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-PasteBin}"
+NOTARIZE="${NOTARIZE:-auto}"
 CREATE_DMG_RETRIES="${CREATE_DMG_RETRIES:-20}"
 DIST_DIR="dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
@@ -15,6 +17,8 @@ ICON_ICNS="${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 STATUS_BAR_SOURCE_PNG="${APP_BUNDLE}/Contents/Resources/StatusBarSource.png"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}.app.zip"
 LATEST_DMG_PATH="${DIST_DIR}/${APP_NAME}-latest.dmg"
+GITHUB_REPO="tburnam/pastebin"
+PUBLISH=false
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -90,6 +94,16 @@ generate_icns() {
   iconutil -c icns "$iconset_dir" -o "$output_icns"
 }
 
+should_notarize() {
+  if [ "$NOTARIZE" = "true" ]; then
+    return 0
+  elif [ "$NOTARIZE" = "false" ]; then
+    return 1
+  fi
+  # auto: notarize when using a Developer ID identity
+  [ "$CODESIGN_IDENTITY" != "-" ]
+}
+
 sign_app_if_configured() {
   need_cmd codesign
 
@@ -100,6 +114,105 @@ sign_app_if_configured() {
 
   codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 }
+
+notarize_and_staple() {
+  local artifact="$1"
+
+  need_cmd xcrun
+
+  echo "Submitting ${artifact} for notarization..."
+  xcrun notarytool submit "$artifact" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait
+
+  if [[ "$artifact" != *.zip ]]; then
+    echo "Stapling notarization ticket to ${artifact}..."
+    xcrun stapler staple "$artifact"
+  fi
+}
+
+get_latest_tag() {
+  git tag -l --sort=-v:refname | head -1 | sed 's/^v//'
+}
+
+bump_version() {
+  local version="$1"
+  local bump_type="$2"
+  local major minor patch
+
+  IFS='.' read -r major minor patch <<< "$version"
+  major="${major:-0}"
+  minor="${minor:-0}"
+  patch="${patch:-0}"
+
+  case "$bump_type" in
+    major) echo "$((major + 1)).0.0" ;;
+    minor) echo "${major}.$((minor + 1)).0" ;;
+    patch) echo "${major}.${minor}.$((patch + 1))" ;;
+    *) echo "$version" ;;
+  esac
+}
+
+prompt_version() {
+  local current
+  current="$(get_latest_tag)"
+  current="${current:-0.0.0}"
+
+  local next_major next_minor next_patch
+  next_major="$(bump_version "$current" major)"
+  next_minor="$(bump_version "$current" minor)"
+  next_patch="$(bump_version "$current" patch)"
+
+  echo ""
+  echo "Current version: ${current}"
+  echo ""
+  echo "  1) patch  → ${next_patch}"
+  echo "  2) minor  → ${next_minor}"
+  echo "  3) major  → ${next_major}"
+  echo ""
+  printf "Select bump type [1/2/3]: "
+  read -r choice
+
+  case "$choice" in
+    1|patch) RELEASE_VERSION="$next_patch" ;;
+    2|minor) RELEASE_VERSION="$next_minor" ;;
+    3|major) RELEASE_VERSION="$next_major" ;;
+    *)
+      echo "Invalid choice." >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Will release as v${RELEASE_VERSION}"
+}
+
+publish_to_github() {
+  need_cmd gh
+
+  local tag="v${RELEASE_VERSION}"
+
+  echo ""
+  echo "Creating GitHub release ${tag}..."
+  git tag "$tag"
+  git push origin "$tag"
+
+  gh release create "$tag" \
+    "$dmg_path" \
+    "$ZIP_PATH" \
+    --repo "$GITHUB_REPO" \
+    --title "${APP_NAME} ${tag}" \
+    --generate-notes
+
+  echo ""
+  echo "Published: https://github.com/${GITHUB_REPO}/releases/tag/${tag}"
+}
+
+# Parse arguments
+for arg in "$@"; do
+  case "$arg" in
+    --publish) PUBLISH=true ;;
+  esac
+done
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 cd "$script_dir"
@@ -118,6 +231,18 @@ fi
 
 validate_icon_png
 
+if [ "$PUBLISH" = true ]; then
+  need_cmd gh
+  need_cmd git
+
+  if [ -n "$(git status --porcelain)" ]; then
+    echo "Working tree is dirty. Commit or stash changes before publishing." >&2
+    exit 1
+  fi
+
+  prompt_version
+fi
+
 echo "Building ${APP_NAME} (${BUILD_CONFIGURATION})..."
 swift build -c "$BUILD_CONFIGURATION"
 
@@ -128,11 +253,15 @@ if [ -z "$latest_build" ]; then
 fi
 
 build_stamp="$(date -r "$latest_build" '+%Y%m%d-%H%M%S')"
-short_version="0.1.0"
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  short_version="$(git describe --tags --abbrev=0 2>/dev/null || echo "0.1.0")"
+if [ -n "${RELEASE_VERSION:-}" ]; then
+  short_version="$RELEASE_VERSION"
+else
+  short_version="0.1.0"
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    short_version="$(git describe --tags --abbrev=0 2>/dev/null || echo "0.1.0")"
+  fi
+  short_version="${short_version#v}"
 fi
-short_version="${short_version#v}"
 bundle_version="$(date -r "$latest_build" '+%Y%m%d%H%M%S')"
 
 rm -rf "$APP_BUNDLE"
@@ -205,10 +334,28 @@ create-dmg \
   "$dmg_staging"
 
 ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+
+if should_notarize; then
+  notarize_and_staple "$dmg_path"
+  notarize_and_staple "$ZIP_PATH"
+  echo "Notarization complete."
+fi
+
 ditto "$dmg_path" "$LATEST_DMG_PATH"
 
+echo ""
 echo "Latest build: $latest_build"
 echo "App bundle: ${APP_BUNDLE}"
 echo "ZIP: ${ZIP_PATH}"
 echo "DMG: ${dmg_path}"
 echo "Latest DMG Alias: ${LATEST_DMG_PATH}"
+
+if should_notarize; then
+  echo "Status: signed + notarized (ready for distribution)"
+else
+  echo "Status: ad-hoc signed (local use only)"
+fi
+
+if [ "$PUBLISH" = true ]; then
+  publish_to_github
+fi

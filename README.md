@@ -1,66 +1,64 @@
-# PasteBin (macOS menu-bar clipboard bin)
+# PasteBin
 
 A macOS app to store, search, and access your clipboard history. All the data lives in a sqlite db on your machine.
 
-<img width="1708" height="360" alt="Screenshot 2026-03-23 at 5 58 42 PM" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
+<img width="1708" height="360" alt="Screenshot 2026-03-23 at 5 58 42 PM" src="https://github.com/user-attachments/assets/890c431c-5d5c-407a-893d-febbe3219a8f" />
 
-## Features
+[**Download the latest release**](https://github.com/tburnam/pastebin/releases/latest)
 
-- Stores all of your copied items to a sqlite database for easy reference and access.
-- Configurable hotkey access paste stack (default: `⌥ and \`)
-- Per-card app icon, character count, and content preview.
-- Keyboard-first interaction:
-  - `Left/Right` arrows to move selection
-  - `Enter` to copy selected item and close
-  - `Cmd+1...Cmd+9` to instantly pick first 9 results
-  - Type to fuzzy-search instantly
-  - `Backspace` edits the query while search is focused, and deletes the selected item after arrow-key navigation
-  - `Esc` clears query (or closes when query is empty)
- 
-I built this becuase I paid for a clipboard manager for years, and there's no reason to pay for software like this anymore. 
+1. Open the DMG and drag `PasteBin.app` into `Applications`.
+2. Launch `PasteBin.app`.
+
+All releases are signed and notarized by Apple — no Gatekeeper warnings.
+
+I built this because I paid for a clipboard manager for years, and there's no reason to pay for software like this anymore.
+
+## Highlights
+
+- Stores all copied items to a local sqlite database for easy reference and access
+- Configurable hotkey to access paste stack (default: `⌥ and \`)
+- Per-card app icon, character count, and content preview
+- Fast fuzzy search with keyboard-first navigation
+- macOS 14+
+
+## Keyboard Shortcuts
+
+- `Left` / `Right`: move selection
+- `Enter`: copy the selected item and close
+- `Cmd+1` through `Cmd+9`: pick one of the first nine results
+- Type anywhere: search immediately
+- `Backspace`: edit the query while search is focused, or delete the selected item after arrow-key navigation
+- `Esc`: clear the query, or close the panel when the query is already empty
+
+## Privacy
+
+All data stays on your Mac. Clipboard history is stored in `~/Library/Application Support/PasteBin/clipboard.sqlite`. No network, accounts, or API keys required.
 
 ## Development
 
 ### Requirements
 
 - macOS 14 or later
-- Xcode command line tools or a full Xcode install
-- `create-dmg` for DMG packaging
+- Xcode Command Line Tools or a full Xcode install
+- Swift 6.2+
 
-### Run
+### Run From Source
 
 ```bash
 swift run
 ```
 
-### Build A Release
+### Test
 
 ```bash
-./release.sh
+swift test
 ```
 
-That script will:
-
-- build the release binary
-- generate a Retina-ready `AppIcon.icns` from `pastebinicon.png`
-- assemble `dist/PasteBin.app`
-- ad hoc sign the bundle by default so the packaged app is internally consistent
-- create a drag-to-Applications DMG in `dist/`
-- refresh `dist/PasteBin.app.zip`
-
-If you have a Developer ID signing identity, you can override the default ad hoc signature:
+### Release
 
 ```bash
-CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./release.sh
+./release.sh            # build, sign, notarize locally
+./release.sh --publish  # same + create GitHub release with version bump
 ```
 
-### Install
-
-Open the generated DMG and drag `PasteBin.app` into `Applications`.
-
-If you share an ad hoc signed build with a teammate, the cleanest internal handoff is the DMG in `dist/`. If Gatekeeper blocks the first launch, have them Control-click `PasteBin.app`, choose `Open`, and confirm once.
-
-### Notes
-
-- If your machine only has Command Line Tools configured, point `xcode-select` at a full Xcode installation.
-- Sharing the app outside your own machine is much smoother with Developer ID signing and notarization. The script supports signing; notarization still needs to be done separately.
+The `--publish` flag prompts for a semver bump (patch/minor/major), tags, and uploads artifacts to GitHub Releases. Requires `create-dmg` (`brew install create-dmg`) and `gh`.
