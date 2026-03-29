@@ -6,7 +6,6 @@
 
 <p align="center">
   A free, open-source clipboard manager for macOS.<br>
-  I built this because I paid for one for years, and there's no reason to.
 </p>
 
 <p align="center">
@@ -36,6 +35,8 @@
 - Per-card app icon, character count, and content preview
 - Fast fuzzy search, keyboard-first navigation
 - macOS 14+
+
+I built this because I paid for one for years, and there's no reason to.
 
 ## Keyboard Shortcuts
 
