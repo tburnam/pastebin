@@ -73,6 +73,7 @@ final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     @Published private(set) var retentionPeriod: HistoryRetentionPeriod
+    @Published private(set) var iCloudSyncEnabled: Bool
 
     var databasePath: String {
         guard let url = try? AppPaths.databaseURL() else {
@@ -83,6 +84,7 @@ final class AppSettings: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let retentionDefaultsKey = "pastebin.history.retention_period"
+    private let syncEnabledDefaultsKey = "pastebin.icloud.sync_enabled"
 
     private init() {
         if let savedValue = defaults.object(forKey: retentionDefaultsKey) as? Int,
@@ -91,11 +93,18 @@ final class AppSettings: ObservableObject {
         } else {
             retentionPeriod = .unlimited
         }
+        iCloudSyncEnabled = defaults.bool(forKey: syncEnabledDefaultsKey)
     }
 
     func updateRetentionPeriod(_ period: HistoryRetentionPeriod) {
         guard retentionPeriod != period else { return }
         retentionPeriod = period
         defaults.set(period.rawValue, forKey: retentionDefaultsKey)
+    }
+
+    func updateiCloudSyncEnabled(_ enabled: Bool) {
+        guard iCloudSyncEnabled != enabled else { return }
+        iCloudSyncEnabled = enabled
+        defaults.set(enabled, forKey: syncEnabledDefaultsKey)
     }
 }

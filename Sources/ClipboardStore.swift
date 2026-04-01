@@ -239,6 +239,14 @@ final class ClipboardStore: ObservableObject {
         }
     }
 
+    var onItemInserted: ((ClipItem) -> Void)?
+    var onItemDeleted: ((Int64) -> Void)?
+    var onBucketCreated: ((Bucket) -> Void)?
+    var onBucketUpdated: ((Int64) -> Void)?
+    var onBucketDeleted: ((Int64) -> Void)?
+    var onBucketItemAdded: ((Int64, Int64) -> Void)?
+    var onBucketItemTitleUpdated: ((Int64, Int64) -> Void)?
+
     private let database: ClipboardDatabase
     private(set) lazy var payloadStore = PayloadPreviewStore(database: database)
     private var scopedBucketItems: [ClipItem] = []
@@ -443,6 +451,8 @@ final class ClipboardStore: ObservableObject {
             do {
                 let inserted = try self.database.insert(captured: captured)
 
+                self.onItemInserted?(inserted)
+
                 let prunedCount: Int
                 do {
                     prunedCount = try self.pruneHistoryForCurrentRetention(referenceDate: inserted.copiedAt)
@@ -463,6 +473,55 @@ final class ClipboardStore: ObservableObject {
             } catch {
                 print("Failed inserting clipboard item: \(error)")
             }
+        }
+    }
+
+    func applyRemoteInsert(_ item: ClipItem) {
+        applyInsertedItem(item)
+    }
+
+    func applyRemoteDelete(dedupeKey: String) {
+        items.removeAll(where: { $0.dedupeKey == dedupeKey })
+        scopedBucketItems.removeAll(where: { $0.dedupeKey == dedupeKey })
+        for bucketID in cachedBucketItemsByID.keys {
+            cachedBucketItemsByID[bucketID]?.removeAll(where: { $0.dedupeKey == dedupeKey })
+        }
+        bumpSearchCorpusRevision()
+        scheduleFiltering(debounce: 0)
+    }
+
+    func applyRemoteBucketInsert(_ bucket: Bucket) {
+        if !buckets.contains(where: { $0.id == bucket.id }) {
+            buckets.append(bucket)
+        }
+    }
+
+    func applyRemoteBucketUpdate(_ bucket: Bucket) {
+        if let index = buckets.firstIndex(where: { $0.id == bucket.id }) {
+            buckets[index] = bucket
+        }
+    }
+
+    func applyRemoteBucketDelete(bucketID: Int64) {
+        buckets.removeAll(where: { $0.id == bucketID })
+        cachedBucketItemsByID[bucketID] = nil
+        partialBucketCacheIDs.remove(bucketID)
+        inFlightBucketCacheLoads.remove(bucketID)
+        if selectedBucketID == bucketID {
+            selectedBucketLoadRequestID &+= 1
+            selectedBucketID = nil
+            isBucketScopeLoading = false
+            scopedBucketItems = []
+        }
+        bumpSearchCorpusRevision()
+        scheduleFiltering(debounce: 0)
+    }
+
+    func applyRemoteBucketItemChange(bucketID: Int64) {
+        cachedBucketItemsByID[bucketID] = nil
+        partialBucketCacheIDs.remove(bucketID)
+        if selectedBucketID == bucketID {
+            reloadSelectedBucketItems()
         }
     }
 
@@ -678,6 +737,7 @@ final class ClipboardStore: ObservableObject {
             let created = try database.createBucket(name: nextName, colorHex: color)
             buckets.append(created)
             cachedBucketItemsByID[created.id] = []
+            onBucketCreated?(created)
             showBucketScope(bucketID: created.id)
         } catch {
             print("Failed creating bucket: \(error)")
@@ -694,6 +754,7 @@ final class ClipboardStore: ObservableObject {
             if let index = buckets.firstIndex(where: { $0.id == bucketID }) {
                 buckets[index] = Bucket(id: bucketID, name: trimmed, colorHex: buckets[index].colorHex)
             }
+            onBucketUpdated?(bucketID)
         } catch {
             print("Failed renaming bucket: \(error)")
         }
@@ -706,6 +767,7 @@ final class ClipboardStore: ObservableObject {
             if let index = buckets.firstIndex(where: { $0.id == bucketID }) {
                 buckets[index] = Bucket(id: bucketID, name: buckets[index].name, colorHex: colorHex)
             }
+            onBucketUpdated?(bucketID)
         } catch {
             print("Failed recoloring bucket: \(error)")
         }
@@ -716,6 +778,7 @@ final class ClipboardStore: ObservableObject {
 
         do {
             try database.deleteClipItem(id: item.id)
+            onItemDeleted?(item.id)
 
             items.removeAll(where: { $0.id == item.id })
             scopedBucketItems.removeAll(where: { $0.id == item.id })
@@ -754,6 +817,7 @@ final class ClipboardStore: ObservableObject {
     func deleteBucket(bucketID: Int64) {
         do {
             try database.deleteBucket(id: bucketID)
+            onBucketDeleted?(bucketID)
 
             buckets.removeAll(where: { $0.id == bucketID })
             cachedBucketItemsByID[bucketID] = nil
@@ -776,6 +840,7 @@ final class ClipboardStore: ObservableObject {
     func addItemToBucket(clipItemID: Int64, bucketID: Int64) {
         do {
             try database.addClipToBucket(clipItemID: clipItemID, bucketID: bucketID)
+            onBucketItemAdded?(bucketID, clipItemID)
             cachedBucketItemsByID[bucketID] = nil
             partialBucketCacheIDs.remove(bucketID)
             inFlightBucketCacheLoads.remove(bucketID)
@@ -813,6 +878,7 @@ final class ClipboardStore: ObservableObject {
                 clipItemID: clipItemID,
                 customTitle: normalizedTitle
             )
+            onBucketItemTitleUpdated?(selectedBucketID, clipItemID)
 
             if let index = scopedBucketItems.firstIndex(where: { $0.id == clipItemID }) {
                 scopedBucketItems[index] = item(scopedBucketItems[index], replacingCustomTitleWith: normalizedTitle)
