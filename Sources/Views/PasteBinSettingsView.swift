@@ -1,4 +1,5 @@
 import AppKit
+import CloudKit
 import SwiftUI
 
 struct PasteBinSettingsView: View {
@@ -7,7 +8,9 @@ struct PasteBinSettingsView: View {
     @StateObject private var hotKeyModel: SettingsHotKeyViewModel
     @State private var retentionSliderValue: Double
     @State private var dbPathHovered = false
+    @State private var syncToggleValue: Bool
     @Namespace private var retentionNamespace
+    private var syncStatusProvider: SyncStatusProvider?
 
     private var retentionOptions: [HistoryRetentionPeriod] {
         HistoryRetentionPeriod.allCases
@@ -25,12 +28,15 @@ struct PasteBinSettingsView: View {
 
     init(
         hotKeyManager: HotKeyManager = .shared,
-        appSettings: AppSettings = .shared
+        appSettings: AppSettings = .shared,
+        syncStatusProvider: SyncStatusProvider? = nil
     ) {
         self.hotKeyManager = hotKeyManager
         self.appSettings = appSettings
+        self.syncStatusProvider = syncStatusProvider
         _hotKeyModel = StateObject(wrappedValue: SettingsHotKeyViewModel(hotKeyManager: hotKeyManager))
         _retentionSliderValue = State(initialValue: Double(appSettings.retentionPeriod.rawValue))
+        _syncToggleValue = State(initialValue: appSettings.iCloudSyncEnabled)
     }
 
     var body: some View {
@@ -49,6 +55,7 @@ struct PasteBinSettingsView: View {
             VStack(spacing: 14) {
                 hotKeySection
                 retentionSection
+                iCloudSyncSection
                 databasePathSection
             }
 
@@ -263,6 +270,79 @@ struct PasteBinSettingsView: View {
                     .font(.system(size: 11, weight: .regular, design: .rounded))
                     .foregroundStyle(.white.opacity(0.36))
                     .contentTransition(.numericText())
+            }
+        }
+    }
+
+    // MARK: - iCloud Sync
+
+    private var iCloudSyncSection: some View {
+        settingsSection(icon: "icloud", title: "ICLOUD SYNC") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Toggle(isOn: $syncToggleValue) {
+                        Text("Sync clipboard history across your Macs")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .onChange(of: syncToggleValue) { _, newValue in
+                        appSettings.updateiCloudSyncEnabled(newValue)
+                    }
+                }
+
+                if syncToggleValue {
+                    syncStatusLine
+                }
+
+                Text("Your clipboard history is stored in your private iCloud database, encrypted end-to-end. Only your devices can access it.")
+                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.36))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var syncStatusLine: some View {
+        if let provider = syncStatusProvider {
+            HStack(spacing: 6) {
+                if provider.accountStatus == .noAccount {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange.opacity(0.85))
+                    Text("Sign in to iCloud in System Settings to enable sync.")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.orange.opacity(0.7))
+                } else if let error = provider.syncError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.orange.opacity(0.85))
+                    Text(error)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.orange.opacity(0.7))
+                } else if provider.isSyncing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.7)
+                    Text("Syncing...")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                } else if let lastSync = provider.lastSyncDate {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color(red: 0.35, green: 0.93, blue: 0.53).opacity(0.7))
+                    Text("Last synced: \(lastSync.formatted(.relative(presentation: .named)))")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                } else {
+                    Image(systemName: "icloud.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Text("Ready to sync")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
             }
         }
     }

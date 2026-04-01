@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: PasteboardMonitor?
     private var panelController: ClipboardPanelController?
     private var statusItem: NSStatusItem?
+    private var syncCoordinator: SyncCoordinator?
     private let hotKeyManager = HotKeyManager.shared
     private let appSettings = AppSettings.shared
     private var cancellables: Set<AnyCancellable> = []
@@ -43,8 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             observeRetentionChanges()
+            observeSyncChanges()
             applyRetentionPolicy(resetQuery: true)
             monitor.start()
+
+            if appSettings.iCloudSyncEnabled {
+                startSync(database: database, store: store)
+            }
         } catch {
             presentLaunchFailureAlert(for: error)
         }
@@ -52,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor?.stop()
+        syncCoordinator?.stop()
     }
 
     @objc private func openClipboardPanel(_ sender: Any?) {
@@ -71,7 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsWindowController() -> NSWindowController {
         let contentView = PasteBinSettingsView(
             hotKeyManager: hotKeyManager,
-            appSettings: appSettings
+            appSettings: appSettings,
+            syncStatusProvider: syncCoordinator?.statusProvider
         )
 
         let hostingController = NSHostingController(rootView: contentView)
@@ -233,6 +241,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.applyRetentionPolicy(resetQuery: false)
             }
             .store(in: &cancellables)
+    }
+
+    private func observeSyncChanges() {
+        appSettings.$iCloudSyncEnabled
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] enabled in
+                guard let self, let database = self.database, let store = self.store else { return }
+                if enabled {
+                    self.startSync(database: database, store: store)
+                } else {
+                    self.syncCoordinator?.stop()
+                    self.syncCoordinator = nil
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func startSync(database: ClipboardDatabase, store: ClipboardStore) {
+        let coordinator = SyncCoordinator(
+            database: database,
+            onRemoteClipChange: { [weak store] item in
+                store?.applyRemoteInsert(item)
+            },
+            onRemoteClipDelete: { [weak store] dedupeKey in
+                store?.applyRemoteDelete(dedupeKey: dedupeKey)
+            },
+            onRemoteBucketChange: { [weak store] bucket in
+                if store?.buckets.contains(where: { $0.id == bucket.id }) == true {
+                    store?.applyRemoteBucketUpdate(bucket)
+                } else {
+                    store?.applyRemoteBucketInsert(bucket)
+                }
+            },
+            onRemoteBucketDelete: { [weak store] bucketID in
+                store?.applyRemoteBucketDelete(bucketID: bucketID)
+            },
+            onRemoteBucketItemChange: { [weak store] bucketID in
+                store?.applyRemoteBucketItemChange(bucketID: bucketID)
+            }
+        )
+
+        store.onItemInserted = { [weak coordinator] item in
+            coordinator?.localItemInserted(clipID: item.id)
+        }
+        store.onItemDeleted = { [weak coordinator] clipID in
+            coordinator?.localItemDeleted(clipID: clipID)
+        }
+        store.onBucketCreated = { [weak coordinator] bucket in
+            coordinator?.localBucketChanged(bucketID: bucket.id)
+        }
+        store.onBucketUpdated = { [weak coordinator] bucketID in
+            coordinator?.localBucketChanged(bucketID: bucketID)
+        }
+        store.onBucketDeleted = { [weak coordinator] bucketID in
+            coordinator?.localBucketDeleted(bucketID: bucketID)
+        }
+        store.onBucketItemAdded = { [weak coordinator] bucketID, clipItemID in
+            coordinator?.localBucketItemChanged(bucketID: bucketID, clipItemID: clipItemID)
+        }
+        store.onBucketItemTitleUpdated = { [weak coordinator] bucketID, clipItemID in
+            coordinator?.localBucketItemChanged(bucketID: bucketID, clipItemID: clipItemID)
+        }
+
+        self.syncCoordinator = coordinator
+        coordinator.start()
     }
 
     private func applyRetentionPolicy(resetQuery: Bool) {

@@ -114,7 +114,7 @@ sign_app_if_configured() {
     return
   fi
 
-  codesign --force --deep --options runtime --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
+  codesign --force --deep --options runtime --entitlements PasteBin.entitlements --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 }
 
 notarize_and_staple() {

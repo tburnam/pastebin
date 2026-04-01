@@ -57,7 +57,7 @@ final class ClipboardDatabase {
 
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    private static let latestUserVersion: Int32 = 7
+    private static let latestUserVersion: Int32 = 8
     private static let inMemoryContentLoadCharacterLimit = 8_192
     private static let searchIndexTableName = "clip_search_fts"
     private static let searchIndexTextCharacterLimit = 65_536
@@ -1009,6 +1009,32 @@ final class ClipboardDatabase {
             try execute("PRAGMA user_version = 7;")
         }
 
+        if version < 8 {
+            try addColumnIfNeeded(table: "clip_items", column: "cloud_record_system_fields", definition: "BLOB")
+            try addColumnIfNeeded(table: "clip_items", column: "sync_state", definition: "TEXT NOT NULL DEFAULT 'local'")
+
+            try addColumnIfNeeded(table: "buckets", column: "cloud_record_system_fields", definition: "BLOB")
+            try addColumnIfNeeded(table: "buckets", column: "sync_state", definition: "TEXT NOT NULL DEFAULT 'local'")
+
+            try addColumnIfNeeded(table: "bucket_items", column: "cloud_record_system_fields", definition: "BLOB")
+            try addColumnIfNeeded(table: "bucket_items", column: "sync_state", definition: "TEXT NOT NULL DEFAULT 'local'")
+
+            try execute("""
+            CREATE TABLE IF NOT EXISTS sync_engine_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                state_data BLOB NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+
+            try execute("CREATE INDEX IF NOT EXISTS idx_clip_items_sync_state ON clip_items(sync_state) WHERE sync_state != 'synced';")
+            try execute("CREATE INDEX IF NOT EXISTS idx_buckets_sync_state ON buckets(sync_state) WHERE sync_state != 'synced';")
+            try execute("CREATE INDEX IF NOT EXISTS idx_bucket_items_sync_state ON bucket_items(sync_state) WHERE sync_state != 'synced';")
+
+            version = 8
+            try execute("PRAGMA user_version = 8;")
+        }
+
         if version < Self.latestUserVersion {
             try execute("PRAGMA user_version = \(Self.latestUserVersion);")
         }
@@ -1425,4 +1451,841 @@ final class ClipboardDatabase {
 
         return Data(bytes: bytes, count: byteCount)
     }
+
+    // MARK: - Sync Support
+
+    func fetchFullClipRow(id: Int64) throws -> SyncableClipRow? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            SELECT id, content, copied_at, source_bundle_id, source_app_name, content_type, link_url,
+                   code_language, structured_format, file_paths_json, image_width, image_height,
+                   payload_data, rtf_data, html_content, dedupe_key, cloud_record_system_fields
+            FROM clip_items WHERE id = ?;
+            """
+
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+
+            return SyncableClipRow(
+                id: sqlite3_column_int64(statement, 0),
+                content: columnText(statement, index: 1) ?? "",
+                copiedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                sourceBundleID: columnText(statement, index: 3),
+                sourceAppName: columnText(statement, index: 4),
+                contentTypeRaw: columnText(statement, index: 5) ?? "text",
+                linkURL: columnText(statement, index: 6),
+                codeLanguage: columnText(statement, index: 7),
+                structuredFormat: columnText(statement, index: 8),
+                filePathsJSON: columnText(statement, index: 9),
+                imageWidth: columnInt(statement, index: 10),
+                imageHeight: columnInt(statement, index: 11),
+                payloadData: columnData(statement, index: 12),
+                rtfData: columnData(statement, index: 13),
+                htmlContent: columnText(statement, index: 14),
+                dedupeKey: columnText(statement, index: 15) ?? "",
+                cloudRecordSystemFields: columnData(statement, index: 16)
+            )
+        }
+    }
+
+    func fetchClipIDByDedupeKey(_ dedupeKey: String) throws -> (id: Int64, copiedAt: Date)? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT id, copied_at FROM clip_items WHERE dedupe_key = ? LIMIT 1;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(dedupeKey, at: 1, to: statement)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return (sqlite3_column_int64(statement, 0), Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)))
+        }
+    }
+
+    func insertOrMergeRemoteClip(_ incoming: IncomingClipRecord) throws -> ClipItem {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let checkSQL = "SELECT id, copied_at FROM clip_items WHERE dedupe_key = ? LIMIT 1;"
+            var checkStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(checkStmt) }
+            bind(incoming.dedupeKey, at: 1, to: checkStmt)
+
+            if sqlite3_step(checkStmt) == SQLITE_ROW {
+                let existingID = sqlite3_column_int64(checkStmt, 0)
+                let existingCopiedAt = Date(timeIntervalSince1970: sqlite3_column_double(checkStmt, 1))
+
+                // Only update if remote is newer
+                let copiedAt = incoming.copiedAt > existingCopiedAt ? incoming.copiedAt : existingCopiedAt
+
+                let updateSQL = """
+                UPDATE clip_items SET copied_at = ?, cloud_record_system_fields = ?, sync_state = 'synced'
+                WHERE id = ?;
+                """
+                var updateStmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil) == SQLITE_OK else {
+                    throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(updateStmt) }
+
+                sqlite3_bind_double(updateStmt, 1, copiedAt.timeIntervalSince1970)
+                bind(incoming.systemFieldsData, at: 2, to: updateStmt)
+                sqlite3_bind_int64(updateStmt, 3, existingID)
+
+                guard sqlite3_step(updateStmt) == SQLITE_DONE else {
+                    throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+                }
+
+                let charCount = incoming.content.count
+                return ClipItem(
+                    id: existingID,
+                    content: String(incoming.content.prefix(ClipboardDatabase.inMemoryContentLoadCharacterLimit)),
+                    copiedAt: copiedAt,
+                    sourceBundleID: incoming.sourceBundleID,
+                    sourceAppName: incoming.sourceAppName,
+                    contentTypeRaw: incoming.contentTypeRaw,
+                    linkURLString: incoming.linkURL,
+                    codeLanguage: incoming.codeLanguage,
+                    structuredFormatRaw: incoming.structuredFormat,
+                    filePathsJSON: incoming.filePathsJSON,
+                    imageWidth: incoming.imageWidth,
+                    imageHeight: incoming.imageHeight,
+                    hasPayloadData: incoming.payloadData != nil,
+                    hasRTFData: incoming.rtfData != nil,
+                    hasHTMLContent: incoming.htmlContent != nil,
+                    dedupeKey: incoming.dedupeKey,
+                    characterCount: charCount
+                )
+            }
+
+            let insertSQL = """
+            INSERT INTO clip_items(
+                content, copied_at, source_bundle_id, source_app_name, content_type, link_url, code_language,
+                structured_format, file_paths_json, image_width, image_height, payload_data, rtf_data,
+                html_content, dedupe_key, cloud_record_system_fields, sync_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced');
+            """
+            var insertStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(insertStmt) }
+
+            bind(incoming.content, at: 1, to: insertStmt)
+            sqlite3_bind_double(insertStmt, 2, incoming.copiedAt.timeIntervalSince1970)
+            bind(incoming.sourceBundleID, at: 3, to: insertStmt)
+            bind(incoming.sourceAppName, at: 4, to: insertStmt)
+            bind(incoming.contentTypeRaw, at: 5, to: insertStmt)
+            bind(incoming.linkURL, at: 6, to: insertStmt)
+            bind(incoming.codeLanguage, at: 7, to: insertStmt)
+            bind(incoming.structuredFormat, at: 8, to: insertStmt)
+            bind(incoming.filePathsJSON, at: 9, to: insertStmt)
+            bind(incoming.imageWidth, at: 10, to: insertStmt)
+            bind(incoming.imageHeight, at: 11, to: insertStmt)
+            bind(incoming.payloadData, at: 12, to: insertStmt)
+            bind(incoming.rtfData, at: 13, to: insertStmt)
+            bind(incoming.htmlContent, at: 14, to: insertStmt)
+            bind(incoming.dedupeKey, at: 15, to: insertStmt)
+            bind(incoming.systemFieldsData, at: 16, to: insertStmt)
+
+            guard sqlite3_step(insertStmt) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+
+            let id = sqlite3_last_insert_rowid(db)
+            let charCount = incoming.content.count
+            return ClipItem(
+                id: id,
+                content: String(incoming.content.prefix(ClipboardDatabase.inMemoryContentLoadCharacterLimit)),
+                copiedAt: incoming.copiedAt,
+                sourceBundleID: incoming.sourceBundleID,
+                sourceAppName: incoming.sourceAppName,
+                contentTypeRaw: incoming.contentTypeRaw,
+                linkURLString: incoming.linkURL,
+                codeLanguage: incoming.codeLanguage,
+                structuredFormatRaw: incoming.structuredFormat,
+                filePathsJSON: incoming.filePathsJSON,
+                imageWidth: incoming.imageWidth,
+                imageHeight: incoming.imageHeight,
+                hasPayloadData: incoming.payloadData != nil,
+                hasRTFData: incoming.rtfData != nil,
+                hasHTMLContent: incoming.htmlContent != nil,
+                dedupeKey: incoming.dedupeKey,
+                characterCount: charCount
+            )
+        }
+    }
+
+    func markClipSynced(id: Int64, systemFieldsData: Data) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE clip_items SET sync_state = 'synced', cloud_record_system_fields = ? WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(systemFieldsData, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func markClipPendingUpload(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE clip_items SET sync_state = 'pending_upload' WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func markClipPendingDelete(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE clip_items SET sync_state = 'pending_delete' WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func fetchDedupeKey(forClipID id: Int64) throws -> String? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT dedupe_key FROM clip_items WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return columnText(statement, index: 0)
+        }
+    }
+
+    func fetchPendingSyncClipIDs() throws -> [Int64] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT id FROM clip_items WHERE sync_state = 'pending_upload' ORDER BY copied_at DESC;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var ids: [Int64] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                ids.append(sqlite3_column_int64(statement, 0))
+            }
+            return ids
+        }
+    }
+
+    func fetchPendingDeleteClipDedupeKeys() throws -> [String] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT dedupe_key FROM clip_items WHERE sync_state = 'pending_delete';"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var keys: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let key = columnText(statement, index: 0) {
+                    keys.append(key)
+                }
+            }
+            return keys
+        }
+    }
+
+    func fetchPendingSyncClipUploadDedupeKeys() throws -> [String] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT dedupe_key FROM clip_items WHERE sync_state = 'pending_upload' ORDER BY copied_at DESC;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var keys: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let key = columnText(statement, index: 0) {
+                    keys.append(key)
+                }
+            }
+            return keys
+        }
+    }
+
+    func markAllLocalClipsPendingUpload() throws {
+        try queue.sync {
+            try execute("UPDATE clip_items SET sync_state = 'pending_upload' WHERE sync_state = 'local';")
+        }
+    }
+
+    func markAllLocalBucketsPendingUpload() throws {
+        try queue.sync {
+            try execute("UPDATE buckets SET sync_state = 'pending_upload' WHERE sync_state = 'local';")
+            try execute("UPDATE bucket_items SET sync_state = 'pending_upload' WHERE sync_state = 'local';")
+        }
+    }
+
+    // MARK: - Bucket Sync Support
+
+    func fetchFullBucketRow(id: Int64) throws -> SyncableBucketRow? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT id, name, color_hex, created_at, cloud_record_system_fields FROM buckets WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+
+            return SyncableBucketRow(
+                id: sqlite3_column_int64(statement, 0),
+                name: columnText(statement, index: 1) ?? "",
+                colorHex: columnText(statement, index: 2) ?? BucketDefaults.defaultColorHex,
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                cloudRecordSystemFields: columnData(statement, index: 4)
+            )
+        }
+    }
+
+    func fetchBucketRecordName(id: Int64) throws -> String? {
+        guard let row = try fetchFullBucketRow(id: id) else { return nil }
+        return SyncRecordMapper.bucketRecordName(name: row.name, createdAt: row.createdAt)
+    }
+
+    func markBucketPendingUpload(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE buckets SET sync_state = 'pending_upload' WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func markBucketSynced(id: Int64, systemFieldsData: Data) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE buckets SET sync_state = 'synced', cloud_record_system_fields = ? WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(systemFieldsData, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func markBucketPendingDelete(id: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE buckets SET sync_state = 'pending_delete' WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, id)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func fetchPendingSyncBucketRecordNames() throws -> [String] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT name, created_at FROM buckets WHERE sync_state = 'pending_upload';"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var names: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = columnText(statement, index: 0) ?? ""
+                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 1))
+                names.append(SyncRecordMapper.bucketRecordName(name: name, createdAt: createdAt))
+            }
+            return names
+        }
+    }
+
+    func fetchPendingDeleteBucketRecordNames() throws -> [String] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT name, created_at FROM buckets WHERE sync_state = 'pending_delete';"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var names: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = columnText(statement, index: 0) ?? ""
+                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 1))
+                names.append(SyncRecordMapper.bucketRecordName(name: name, createdAt: createdAt))
+            }
+            return names
+        }
+    }
+
+    func insertOrMergeRemoteBucket(_ incoming: IncomingBucketRecord) throws -> Bucket {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let checkSQL = "SELECT id FROM buckets WHERE name = ? AND created_at = ? LIMIT 1;"
+            var checkStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(checkStmt) }
+            bind(incoming.name, at: 1, to: checkStmt)
+            sqlite3_bind_double(checkStmt, 2, incoming.createdAt.timeIntervalSince1970)
+
+            if sqlite3_step(checkStmt) == SQLITE_ROW {
+                let existingID = sqlite3_column_int64(checkStmt, 0)
+
+                let updateSQL = "UPDATE buckets SET name = ?, color_hex = ?, cloud_record_system_fields = ?, sync_state = 'synced' WHERE id = ?;"
+                var updateStmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nil) == SQLITE_OK else {
+                    throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+                }
+                defer { sqlite3_finalize(updateStmt) }
+
+                bind(incoming.name, at: 1, to: updateStmt)
+                bind(incoming.colorHex, at: 2, to: updateStmt)
+                bind(incoming.systemFieldsData, at: 3, to: updateStmt)
+                sqlite3_bind_int64(updateStmt, 4, existingID)
+
+                guard sqlite3_step(updateStmt) == SQLITE_DONE else {
+                    throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+                }
+
+                return Bucket(id: existingID, name: incoming.name, colorHex: incoming.colorHex)
+            }
+
+            let insertSQL = "INSERT INTO buckets(name, color_hex, created_at, cloud_record_system_fields, sync_state) VALUES (?, ?, ?, ?, 'synced');"
+            var insertStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(insertStmt) }
+
+            bind(incoming.name, at: 1, to: insertStmt)
+            bind(incoming.colorHex, at: 2, to: insertStmt)
+            sqlite3_bind_double(insertStmt, 3, incoming.createdAt.timeIntervalSince1970)
+            bind(incoming.systemFieldsData, at: 4, to: insertStmt)
+
+            guard sqlite3_step(insertStmt) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+
+            return Bucket(id: sqlite3_last_insert_rowid(db), name: incoming.name, colorHex: incoming.colorHex)
+        }
+    }
+
+    func deleteBucketBySyncRemoval(recordName: String) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let fetchSQL = "SELECT id, name, created_at FROM buckets;"
+            var fetchStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, fetchSQL, -1, &fetchStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(fetchStmt) }
+
+            var targetID: Int64?
+            while sqlite3_step(fetchStmt) == SQLITE_ROW {
+                let name = columnText(fetchStmt, index: 1) ?? ""
+                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(fetchStmt, 2))
+                if SyncRecordMapper.bucketRecordName(name: name, createdAt: createdAt) == recordName {
+                    targetID = sqlite3_column_int64(fetchStmt, 0)
+                    break
+                }
+            }
+
+            guard let id = targetID else { return }
+
+            let deleteSQL = "DELETE FROM buckets WHERE id = ?;"
+            var deleteStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, deleteSQL, -1, &deleteStmt, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(deleteStmt) }
+
+            sqlite3_bind_int64(deleteStmt, 1, id)
+
+            guard sqlite3_step(deleteStmt) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func fetchBucketIDByRecordName(_ recordName: String) throws -> Int64? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT id, name, created_at FROM buckets;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = columnText(statement, index: 1) ?? ""
+                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 2))
+                if SyncRecordMapper.bucketRecordName(name: name, createdAt: createdAt) == recordName {
+                    return sqlite3_column_int64(statement, 0)
+                }
+            }
+            return nil
+        }
+    }
+
+    // MARK: - BucketItem Sync Support
+
+    func markBucketItemPendingUpload(bucketID: Int64, clipItemID: Int64) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE bucket_items SET sync_state = 'pending_upload' WHERE bucket_id = ? AND clip_item_id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, bucketID)
+            sqlite3_bind_int64(statement, 2, clipItemID)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func markBucketItemSynced(bucketID: Int64, clipItemID: Int64, systemFieldsData: Data) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "UPDATE bucket_items SET sync_state = 'synced', cloud_record_system_fields = ? WHERE bucket_id = ? AND clip_item_id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(systemFieldsData, at: 1, to: statement)
+            sqlite3_bind_int64(statement, 2, bucketID)
+            sqlite3_bind_int64(statement, 3, clipItemID)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func insertOrMergeRemoteBucketItem(_ incoming: IncomingBucketItemRecord) throws {
+        guard let bucketID = try fetchBucketIDByRecordName(incoming.bucketRecordName),
+              let clipResult = try fetchClipIDByDedupeKey(incoming.clipRecordName) else {
+            return
+        }
+
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            INSERT INTO bucket_items(bucket_id, clip_item_id, custom_title, added_at, cloud_record_system_fields, sync_state)
+            VALUES (?, ?, ?, ?, ?, 'synced')
+            ON CONFLICT(bucket_id, clip_item_id) DO UPDATE SET
+                custom_title = excluded.custom_title,
+                cloud_record_system_fields = excluded.cloud_record_system_fields,
+                sync_state = 'synced';
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, bucketID)
+            sqlite3_bind_int64(statement, 2, clipResult.id)
+            bind(incoming.customTitle, at: 3, to: statement)
+            sqlite3_bind_double(statement, 4, incoming.addedAt.timeIntervalSince1970)
+            bind(incoming.systemFieldsData, at: 5, to: statement)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func fetchBucketItemForSync(bucketID: Int64, clipItemID: Int64) throws -> SyncableBucketItemRow? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            SELECT bi.bucket_id, bi.clip_item_id, bi.custom_title, bi.added_at, bi.cloud_record_system_fields,
+                   b.name, b.created_at, ci.dedupe_key
+            FROM bucket_items bi
+            JOIN buckets b ON b.id = bi.bucket_id
+            JOIN clip_items ci ON ci.id = bi.clip_item_id
+            WHERE bi.bucket_id = ? AND bi.clip_item_id = ?;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            sqlite3_bind_int64(statement, 1, bucketID)
+            sqlite3_bind_int64(statement, 2, clipItemID)
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+
+            let bucketName = columnText(statement, index: 5) ?? ""
+            let bucketCreatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+            let clipDedupeKey = columnText(statement, index: 7) ?? ""
+
+            return SyncableBucketItemRow(
+                bucketID: sqlite3_column_int64(statement, 0),
+                clipItemID: sqlite3_column_int64(statement, 1),
+                customTitle: columnText(statement, index: 2),
+                addedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                bucketDedupeKey: SyncRecordMapper.bucketRecordName(name: bucketName, createdAt: bucketCreatedAt),
+                clipDedupeKey: clipDedupeKey,
+                cloudRecordSystemFields: columnData(statement, index: 4)
+            )
+        }
+    }
+
+    func fetchPendingSyncBucketItemKeys() throws -> [(bucketID: Int64, clipItemID: Int64)] {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT bucket_id, clip_item_id FROM bucket_items WHERE sync_state = 'pending_upload';"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var keys: [(bucketID: Int64, clipItemID: Int64)] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                keys.append((sqlite3_column_int64(statement, 0), sqlite3_column_int64(statement, 1)))
+            }
+            return keys
+        }
+    }
+
+    func clearAllSyncMetadata() throws {
+        try queue.sync {
+            try execute("BEGIN TRANSACTION;")
+            try execute("UPDATE clip_items SET sync_state = 'local', cloud_record_system_fields = NULL;")
+            try execute("UPDATE buckets SET sync_state = 'local', cloud_record_system_fields = NULL;")
+            try execute("UPDATE bucket_items SET sync_state = 'local', cloud_record_system_fields = NULL;")
+            try execute("DELETE FROM sync_engine_state;")
+            try execute("COMMIT;")
+        }
+    }
+
+    func persistSyncEngineState(_ data: Data) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = """
+            INSERT INTO sync_engine_state (id, state_data, updated_at) VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET state_data = excluded.state_data, updated_at = excluded.updated_at;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(data, at: 1, to: statement)
+            sqlite3_bind_double(statement, 2, Date().timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
+    func loadSyncEngineState() throws -> Data? {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "SELECT state_data FROM sync_engine_state WHERE id = 1;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return columnData(statement, index: 0)
+        }
+    }
+
+    func deleteClipBySyncRemoval(dedupeKey: String) throws {
+        try queue.sync {
+            guard let db else {
+                throw DatabaseError.openFailed("SQLite handle is not available")
+            }
+
+            let sql = "DELETE FROM clip_items WHERE dedupe_key = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DatabaseError.statementFailed(String(cString: sqlite3_errmsg(db)))
+            }
+            defer { sqlite3_finalize(statement) }
+
+            bind(dedupeKey, at: 1, to: statement)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DatabaseError.stepFailed(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+    }
+
 }
